@@ -1,0 +1,1573 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zephyr — Architecture &amp; Design Draft</title>
+<script>
+/* Progressive enhancement: only hide [data-reveal] elements when JS + motion
+   are both available, so no-JS and reduced-motion users see the finished state. */
+if (!matchMedia('(prefers-reduced-motion: reduce)').matches && 'IntersectionObserver' in window) {
+  document.documentElement.classList.add('js-motion');
+}
+</script>
+<style>
+/* ============================================================
+   tokens.css — Apple design language, complete color token set
+   (copied verbatim from the apple-design skill)
+   ============================================================ */
+:root {
+  --bg: #f5f5f7;
+  --text: #1d1d1f;
+  --text-2: #6e6e73;
+  --text-3: #67676c;
+  --accent: #0066cc;
+  --accent-hover: #005fb8;
+  --green: #34c759;
+  --orange: #ff9500;
+  --gray: #86868b;
+  --red: #d00f1f;
+  --input-bg: #ffffff;
+  --input-border: #d2d2d7;
+  --ring: rgba(0, 102, 204, 0.35);
+  --seg-bg: rgba(120, 120, 128, 0.14);
+  --seg-active: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #000000;
+    --text: #f5f5f7;
+    --text-2: #a1a1a6;
+    --text-3: #86868b;
+    --accent: #0071e3;
+    --accent-hover: #0068c8;
+    --green: #30d158;
+    --orange: #ff9f0a;
+    --gray: #98989d;
+    --red: #ff453a;
+    --input-bg: #1c1c1e;
+    --input-border: #424245;
+    --ring: rgba(0, 113, 227, 0.45);
+    --seg-bg: rgba(120, 120, 128, 0.24);
+    --seg-active: #636366;
+  }
+}
+
+/* ============================================================
+   base layout (adapted from patterns.css — values kept)
+   ============================================================ */
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+html, body { margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100svh;
+  display: flex;
+  flex-direction: column; /* footer pins to the bottom on short pages */
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+main {
+  flex: 1;
+  width: 100%;
+  max-width: 1160px;
+  margin: 0 auto;
+  padding: 40px 24px 48px;
+  text-align: start;
+  animation: fade-up 0.5s ease both;
+}
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+h1 {
+  margin: 0 0 14px;
+  font-size: clamp(34px, 7vw, 56px);
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  line-height: 1.05;
+}
+.tagline {
+  margin: 0 0 44px;
+  margin-inline: auto;
+  max-width: 42ch;
+  font-size: clamp(17px, 2.6vw, 21px);
+  line-height: 1.45;
+  color: var(--text-2);
+}
+
+/* ---------- accessibility helpers ---------- */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.skip-link {
+  position: absolute; top: -56px; inset-inline-start: 16px; z-index: 10;
+  padding: 10px 18px;
+  border-radius: 0 0 12px 12px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  text-decoration: none;
+}
+.skip-link:focus { top: 0; }
+
+a { color: var(--accent); }
+a:focus-visible, button:focus-visible, summary:focus-visible {
+  outline: none;
+  border-radius: 6px;
+  box-shadow: 0 0 0 3px var(--ring);
+}
+
+/* ---------- sticky nav ---------- */
+.nav {
+  position: sticky; top: 0; z-index: 5;
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px);
+  border-bottom: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
+}
+.nav-inner {
+  max-width: 1160px;
+  margin: 0 auto;
+  padding: 0 24px;
+  height: 52px;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+.brand {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.brand .mark { color: var(--accent); }
+.nav-links {
+  margin-inline-start: auto;
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.nav-links::-webkit-scrollbar { display: none; }
+.nav-links a {
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-2);
+  text-decoration: none;
+  white-space: nowrap;
+  transition: color 0.2s ease, background-color 0.2s ease;
+}
+.nav-links a:hover {
+  color: var(--text);
+  background: var(--seg-bg);
+}
+
+/* ---------- hero ---------- */
+.hero { text-align: center; margin-bottom: 8px; }
+.hero .tagline { margin-bottom: 22px; }
+.hero-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 48px;
+}
+.hero-note {
+  margin: -28px 0 40px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-3);
+}
+
+/* ---------- status badge (from patterns.css) ---------- */
+.badge {
+  --status: var(--gray);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: var(--seg-bg);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+.badge.ok   { --status: var(--green); }
+.badge.warn { --status: var(--orange); }
+.badge.bad  { --status: var(--red); }
+.badge .dot {
+  position: relative;
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--status);
+  box-shadow: 0 0 8px 1px color-mix(in srgb, var(--status) 55%, transparent);
+}
+.badge.ok .dot::after,
+.badge.warn .dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--status);
+  animation: dot-ping 2.4s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+.badge.warn .dot::after { animation-duration: 3.6s; }
+@keyframes dot-ping {
+  0% { transform: scale(1); opacity: 0.6; }
+  70%, 100% { transform: scale(3.2); opacity: 0; }
+}
+/* many badges on one page = quiet dots (pattern: frozen dot, no ping) */
+.toc-card .badge .dot::after,
+.timeline .badge .dot::after,
+.open-q .badge .dot::after { content: none; }
+
+/* ---------- on this page ---------- */
+.toc-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-bottom: 24px;
+}
+@media (max-width: 920px) { .toc-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 560px) { .toc-grid { grid-template-columns: 1fr; } }
+.toc-card {
+  display: block;
+  padding: 18px 20px;
+  border-radius: 16px;
+  background: var(--input-bg);
+  border: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
+  text-decoration: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.toc-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  box-shadow: 0 12px 32px -14px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+.toc-num {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: 0.02em;
+}
+.toc-title {
+  margin-top: 6px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+.toc-desc {
+  margin-top: 4px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-2);
+}
+
+/* ---------- sections ---------- */
+.doc { margin-top: 72px; scroll-margin-top: 72px; }
+.sec-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 8px; }
+.sec-num {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: 0.06em;
+}
+h2 {
+  margin: 0;
+  font-size: clamp(24px, 4vw, 34px);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+h3 {
+  margin: 32px 0 12px;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.lede {
+  margin: 0 0 24px;
+  max-width: 75ch;
+  font-size: 16.5px;
+  line-height: 1.55;
+  color: var(--text-2);
+}
+p { margin: 0 0 14px; max-width: 78ch; font-size: 15.5px; line-height: 1.55; }
+ul, ol { margin: 0 0 14px; padding-inline-start: 22px; font-size: 15px; line-height: 1.55; }
+li { margin-bottom: 6px; max-width: 78ch; }
+li > ul { margin-top: 6px; }
+strong { font-weight: 600; }
+
+/* ---------- cards ---------- */
+.card {
+  background: var(--input-bg);
+  border: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
+  border-radius: 22px;
+  padding: 24px 28px;
+  margin: 18px 0;
+}
+.card h3 { margin-top: 0; }
+
+/* ---------- tables ---------- */
+.table-wrap {
+  border: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
+  border-radius: 16px;
+  background: var(--input-bg);
+  overflow-x: auto;
+  margin: 18px 0;
+}
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th {
+  text-align: start;
+  font-weight: 600;
+  padding: 12px 16px;
+  border-bottom: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
+  white-space: nowrap;
+  color: var(--text);
+}
+td {
+  padding: 12px 16px;
+  border-bottom: 1px solid color-mix(in srgb, var(--text) 7%, transparent);
+  vertical-align: top;
+  line-height: 1.45;
+}
+tr:last-child td { border-bottom: 0; }
+td.dim { color: var(--text-2); }
+
+/* ---------- code ---------- */
+code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.88em;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+pre {
+  margin: 18px 0;
+  padding: 18px 20px;
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--text) 5%, var(--input-bg));
+  border: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
+  overflow-x: auto;
+}
+pre code {
+  padding: 0;
+  background: none;
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+
+/* ---------- callout (accent-tinted, derived surface) ---------- */
+.callout {
+  margin: 18px 0;
+  padding: 18px 22px;
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--input-bg));
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  box-shadow: 0 10px 28px -16px color-mix(in srgb, var(--accent) 35%, transparent);
+  font-size: 14.5px;
+  line-height: 1.55;
+}
+.callout p { margin: 0; }
+.callout + .callout { margin-top: 12px; }
+
+/* ---------- diagram cards & SVG ---------- */
+.diagram-card { padding: 18px; }
+.diagram-card figcaption {
+  margin-top: 12px;
+  padding-inline: 8px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+.diagram { width: 100%; height: auto; display: block; }
+.diagram text { font-family: inherit; }
+.diagram .box {
+  fill: var(--input-bg);
+  stroke: color-mix(in srgb, var(--text) 14%, transparent);
+  stroke-width: 1;
+}
+.diagram .box-auth {
+  fill: color-mix(in srgb, var(--accent) 6%, var(--input-bg));
+  stroke: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.diagram .box-sub {
+  fill: color-mix(in srgb, var(--text) 4%, var(--input-bg));
+  stroke: color-mix(in srgb, var(--text) 12%, transparent);
+}
+.diagram .lbl { fill: var(--text); font-size: 13px; font-weight: 600; }
+.diagram .sub { fill: var(--text-2); font-size: 11px; }
+.diagram .tiny { fill: var(--text-3); font-size: 10px; }
+.diagram .edge {
+  stroke: color-mix(in srgb, var(--text) 38%, transparent);
+  fill: none;
+  stroke-width: 1.5;
+}
+.diagram .edge-dash {
+  stroke-dasharray: 4 4;
+  stroke: color-mix(in srgb, var(--text) 30%, transparent);
+}
+.diagram .elbl { fill: var(--text-2); font-size: 10.5px; }
+.diagram .note { fill: var(--text-3); font-size: 11px; }
+.diagram .arrhead { fill: color-mix(in srgb, var(--text) 38%, transparent); }
+
+/* ---------- flow cards ---------- */
+.grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin: 18px 0; }
+@media (max-width: 860px) { .grid-2 { grid-template-columns: 1fr; } }
+.flow { margin: 0; }
+.flow-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.flow-name { font-size: 15.5px; font-weight: 600; letter-spacing: -0.01em; }
+.steps {
+  counter-reset: step;
+  list-style: none;
+  margin: 14px 0 0;
+  padding: 0;
+}
+.steps li {
+  counter-increment: step;
+  position: relative;
+  padding: 0 0 10px 32px;
+  font-size: 14px;
+  line-height: 1.5;
+  margin: 0;
+}
+.steps li:last-child { padding-bottom: 0; }
+.steps li::before {
+  content: counter(step);
+  position: absolute;
+  inset-inline-start: 0;
+  top: 1px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+/* ---------- timeline (roadmap) ---------- */
+.timeline { list-style: none; margin: 18px 0 0; padding: 0; position: relative; }
+.timeline::before {
+  content: "";
+  position: absolute;
+  inset-block: 10px;
+  inset-inline-start: 6px;
+  width: 2px;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--text) 12%, transparent);
+}
+.phase { position: relative; padding: 0 0 26px 42px; }
+.phase:last-child { padding-bottom: 0; }
+.phase-dot {
+  position: absolute;
+  inset-inline-start: 0;
+  top: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--bg);
+  border: 2.5px solid var(--accent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.phase.optional .phase-dot {
+  border-color: var(--gray);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--gray) 12%, transparent);
+}
+.phase-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.phase-name { font-size: 15.5px; font-weight: 600; letter-spacing: -0.01em; }
+.phase-line { margin: 6px 0 0; font-size: 14px; line-height: 1.5; color: var(--text); }
+.phase-line .badge { margin-inline-end: 8px; }
+.phase-line.dim { color: var(--text-2); }
+
+/* ---------- acceptance checklist ---------- */
+.ac-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin: 18px 0; }
+@media (max-width: 860px) { .ac-grid { grid-template-columns: 1fr; } }
+.ac { margin: 0; }
+.ac h3 { margin: 0 0 10px; }
+.check { list-style: none; margin: 0; padding: 0; }
+.check li {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 7px 0;
+  font-size: 14px;
+  line-height: 1.5;
+  margin: 0;
+}
+.check .tick {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--green) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--green) 35%, transparent);
+  display: grid;
+  place-items: center;
+}
+.check .tick svg { display: block; }
+
+/* ---------- definition of done panel (from patterns.css .panel) ---------- */
+.panel {
+  --status: var(--gray);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  max-width: 480px;
+  margin: 32px auto;
+  padding: 26px 30px 28px;
+  border-radius: 22px;
+  background: color-mix(in srgb, var(--status) 8%, var(--input-bg));
+  border: 1px solid color-mix(in srgb, var(--status) 30%, transparent);
+  box-shadow: 0 12px 32px -14px color-mix(in srgb, var(--status) 40%, transparent);
+  text-align: center;
+}
+.panel.ok { --status: var(--green); }
+.panel.show { animation: panel-in 0.45s cubic-bezier(0.2, 0.8, 0.3, 1.05) both; }
+@keyframes panel-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.panel .icon { width: 64px; height: 64px; margin-bottom: 6px; color: var(--status); }
+.panel .icon svg { display: block; width: 64px; height: 64px; }
+.panel .icon .ring, .panel .icon .mark { stroke-dasharray: 1; }
+.panel.show .icon .ring { animation: draw-on 0.55s ease-out both; }
+.panel.show .icon .mark { animation: draw-on 0.4s ease-out 0.35s both; }
+@keyframes draw-on { from { stroke-dashoffset: 1; } }
+.panel .title {
+  margin: 0;
+  font-size: 21px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.panel .sub {
+  margin: 0;
+  max-width: 40ch;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--text-2);
+}
+
+/* ---------- open questions ---------- */
+.open { list-style: none; margin: 18px 0 0; padding: 0; display: grid; gap: 12px; }
+.open-q {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 16px 20px;
+  border-radius: 16px;
+  background: var(--input-bg);
+  border: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
+}
+.open-q .badge { flex: none; margin-top: 2px; }
+.open-q .q { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+.open-q .d { margin: 4px 0 0; font-size: 13.5px; line-height: 1.5; color: var(--text-2); }
+.open-q .d .rec { color: var(--accent); font-weight: 600; }
+
+/* ---------- footer ---------- */
+footer {
+  padding: 28px 24px 36px;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-3);
+}
+footer p { margin: 0; }
+.footer-links a {
+  color: var(--text-2);
+  text-decoration: none;
+}
+.footer-links a:hover { text-decoration: underline; }
+.footer-note {
+  max-width: 56ch;
+  margin: 0 auto 10px;
+  color: var(--text-2);
+}
+
+/* ---------- motion: scroll reveals + SVG draw-on ----------
+   Base styles are the finished state; JS adds the pre-state only
+   when motion is available, so reduced-motion / no-JS land on it. */
+@media (prefers-reduced-motion: no-preference) {
+  html.js-motion [data-reveal] {
+    opacity: 0;
+    transform: translateY(12px);
+    transition:
+      opacity 0.55s ease var(--d, 0s),
+      transform 0.55s cubic-bezier(0.2, 0.8, 0.3, 1.05) var(--d, 0s);
+  }
+  html.js-motion [data-reveal].rv-in { opacity: 1; transform: none; }
+  html.js-motion [data-reveal] .edge.draw {
+    stroke-dasharray: 1;
+    stroke-dashoffset: 1;
+  }
+  html.js-motion [data-reveal].rv-in .edge.draw {
+    animation: edge-draw 0.9s ease-out 0.2s forwards;
+  }
+  @keyframes edge-draw { to { stroke-dashoffset: 0; } }
+}
+
+/* ---------- reduced motion ---------- */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition-duration: 0.01ms !important;
+  }
+  .badge .dot::after { content: none; }
+  html { scroll-behavior: auto; }
+}
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="nav" id="top">
+  <div class="nav-inner">
+    <a class="brand" href="#top"><span class="mark">⌁</span>&nbsp;Zephyr</a>
+    <nav class="nav-links" aria-label="Sections">
+      <a href="#architecture">Architecture</a>
+      <a href="#structure">Structure</a>
+      <a href="#data-model">Data model</a>
+      <a href="#interfaces">Interfaces</a>
+      <a href="#flows">Flows</a>
+      <a href="#decisions">Decisions</a>
+      <a href="#roadmap">Roadmap</a>
+      <a href="#acceptance">Acceptance</a>
+      <a href="#questions">Open questions</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+  <!-- ================= HERO ================= -->
+  <div class="hero">
+    <h1>Zephyr</h1>
+    <p class="tagline">A local-first journal CLI — tamper-evident, compact, and designed from day one to be read by an AI.</p>
+    <div class="hero-meta">
+      <span class="badge"><span class="dot"></span>Spec-first · no code yet</span>
+      <span class="badge"><span class="dot"></span>Language-agnostic</span>
+      <span class="badge ok"><span class="dot"></span>Phases 0–8</span>
+    </div>
+    <p class="hero-note">Architecture draft generated from <code>README.md</code> (the complete plan) · sections below draft the nine areas requested; anything the plan leaves open is flagged in <a href="#questions">Open questions</a>.</p>
+  </div>
+
+  <!-- ================= ON THIS PAGE ================= -->
+  <nav class="toc-grid" aria-label="On this page">
+    <a class="toc-card" data-reveal href="#architecture">
+      <span class="toc-num">01</span>
+      <div class="toc-title">Architecture</div>
+      <p class="toc-desc">Components, responsibilities, dependencies, and the trust model.</p>
+    </a>
+    <a class="toc-card" data-reveal style="--d:0.05s" href="#structure">
+      <span class="toc-num">02</span>
+      <div class="toc-title">Project Structure</div>
+      <p class="toc-desc">Target module layout and what each part owns.</p>
+    </a>
+    <a class="toc-card" data-reveal style="--d:0.1s" href="#data-model">
+      <span class="toc-num">03</span>
+      <div class="toc-title">Domain / Data Model</div>
+      <p class="toc-desc">Records, segments, checkpoints, anchors, derived artifacts.</p>
+    </a>
+    <a class="toc-card" data-reveal href="#interfaces">
+      <span class="toc-num">04</span>
+      <div class="toc-title">Interfaces &amp; Contracts</div>
+      <p class="toc-desc">CLI surface, internal boundaries, external integrations.</p>
+    </a>
+    <a class="toc-card" data-reveal style="--d:0.05s" href="#flows">
+      <span class="toc-num">05</span>
+      <div class="toc-title">Key Flows</div>
+      <p class="toc-desc">How log, verify, edit, redact, ask, and checkpoint move through the system.</p>
+    </a>
+    <a class="toc-card" data-reveal style="--d:0.1s" href="#decisions">
+      <span class="toc-num">06</span>
+      <div class="toc-title">Architecture Decisions</div>
+      <p class="toc-desc">What was chosen, why, trade-offs, and rejected alternatives.</p>
+    </a>
+    <a class="toc-card" data-reveal href="#roadmap">
+      <span class="toc-num">07</span>
+      <div class="toc-title">Implementation Roadmap</div>
+      <p class="toc-desc">Phases 0–8 in dependency order, each with a pass/fail gate.</p>
+    </a>
+    <a class="toc-card" data-reveal style="--d:0.05s" href="#acceptance">
+      <span class="toc-num">08</span>
+      <div class="toc-title">Acceptance Criteria</div>
+      <p class="toc-desc">What “done” means for each major capability, plus v1 done.</p>
+    </a>
+    <a class="toc-card" data-reveal style="--d:0.1s" href="#questions">
+      <span class="toc-num">09</span>
+      <div class="toc-title">Open Questions</div>
+      <p class="toc-desc">Ambiguities and decisions that still need to be made.</p>
+    </a>
+  </nav>
+
+  <!-- ================= 01 ARCHITECTURE ================= -->
+  <section class="doc" id="architecture" data-reveal>
+    <div class="sec-head"><span class="sec-num">01</span><h2>Architecture</h2></div>
+    <p class="lede">Five components, two of them authoritative. The stored log is compact and canonical; everything else is derived, rebuildable, and verifiable against it. Deleting every derived artifact loses nothing.</p>
+
+    <h3>Components, responsibilities, dependencies</h3>
+    <div class="table-wrap">
+      <table>
+        <caption class="sr-only">Architecture components with responsibilities and dependencies</caption>
+        <thead>
+          <tr><th>Component</th><th>Responsibility</th><th>Depends on</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>CLI</strong> <span class="dim">(<code>zephyr</code>)</span></td>
+            <td>Command surface. Parses input, calls core, renders views. Capture must take ~3 seconds with no required fields.</td>
+            <td>Core library</td>
+          </tr>
+          <tr>
+            <td><strong>Core library</strong></td>
+            <td>Append, verify, read. Record encoding, hash chain, segments, atomic I/O, crash recovery. The only code that touches the canonical format.</td>
+            <td>Canonical log (storage) · Anchors (checkpoint publishing)</td>
+          </tr>
+          <tr>
+            <td><strong>Canonical log</strong></td>
+            <td>Chained records grouped into sealed segments. The single source of truth. Never modified after sealing, except payload-region redaction.</td>
+            <td>Local disk (no network required to log)</td>
+          </tr>
+          <tr>
+            <td><strong>Derived layer</strong> <span class="dim">(rebuildable)</span></td>
+            <td>LLM view renderer, search index, digests, profile, entities, MCP server. Every artifact records provenance (log range + head hash) and verifies integrity before serving.</td>
+            <td>Canonical log</td>
+          </tr>
+          <tr>
+            <td><strong>Anchors</strong></td>
+            <td>External, tamper-evident attestations: Ed25519-signed checkpoints in a private git repo (or second device), later OpenTimestamps proofs on sealed segment heads. Hold hashes only — never content.</td>
+            <td>Core (checkpoint data) · external git / OpenTimestamps</td>
+          </tr>
+          <tr>
+            <td><strong>LLM providers</strong> <span class="dim">(external)</span></td>
+            <td>Answer questions over exported views. Never implicit — anything sent to an LLM is an explicit user action.</td>
+            <td>Verified LLM view via <code>export --for-ai</code> / <code>ask</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Architecture diagram</h3>
+    <figure class="card diagram-card">
+      <svg class="diagram" viewBox="0 0 760 440" role="img" aria-labelledby="arch-title arch-desc">
+        <title id="arch-title">Zephyr architecture diagram</title>
+        <desc id="arch-desc">The CLI calls the core library. The core library reads and writes the canonical log, which is a chained set of segments. The canonical log feeds the rebuildable derived layer: LLM view renderer, search index, digests, profile and entities, and a read-only MCP server. The core publishes signed checkpoints to anchors — a private git repository and OpenTimestamps — which sit below the canonical log. Only the canonical log and anchors are authoritative.</desc>
+        <defs>
+          <marker id="arch-arr" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path class="arrhead" d="M0,0 L10,5 L0,10 z"></path>
+          </marker>
+        </defs>
+
+        <!-- boxes -->
+        <rect class="box" x="36" y="36" width="132" height="56" rx="12"></rect>
+        <text class="lbl" x="102" y="60" text-anchor="middle">CLI</text>
+        <text class="sub" x="102" y="78" text-anchor="middle">zephyr commands</text>
+
+        <rect class="box" x="300" y="36" width="240" height="56" rx="12"></rect>
+        <text class="lbl" x="420" y="60" text-anchor="middle">Core library</text>
+        <text class="sub" x="420" y="78" text-anchor="middle">append · verify · read</text>
+
+        <rect class="box-auth" x="120" y="180" width="230" height="64" rx="12"></rect>
+        <text class="lbl" x="235" y="206" text-anchor="middle">Canonical log</text>
+        <text class="sub" x="235" y="224" text-anchor="middle">segments · hash chain · footers</text>
+
+        <rect class="box" x="420" y="150" width="300" height="190" rx="12"></rect>
+        <text class="lbl" x="570" y="178" text-anchor="middle">Derived layer</text>
+        <text class="tiny" x="570" y="194" text-anchor="middle">rebuildable — verify before trust</text>
+        <text class="sub" x="444" y="218">LLM view renderer</text>
+        <text class="sub" x="444" y="242">Search index</text>
+        <text class="sub" x="444" y="266">Digests · profile · entities</text>
+        <text class="sub" x="444" y="290">MCP server (read-only by default)</text>
+
+        <rect class="box-auth" x="120" y="330" width="230" height="60" rx="12"></rect>
+        <text class="lbl" x="235" y="354" text-anchor="middle">Anchors</text>
+        <text class="sub" x="235" y="372" text-anchor="middle">private git · OpenTimestamps</text>
+
+        <!-- edges -->
+        <path class="edge draw" pathLength="1" d="M170 64 L296 64" marker-end="url(#arch-arr)"></path>
+        <path class="edge draw" pathLength="1" d="M330 94 L256 176" marker-end="url(#arch-arr)"></path>
+        <path class="edge draw" pathLength="1" d="M512 94 L566 146" marker-end="url(#arch-arr)"></path>
+        <path class="edge draw" pathLength="1" d="M352 212 L416 212" marker-end="url(#arch-arr)"></path>
+        <path class="edge draw" pathLength="1" d="M235 246 L235 326" marker-end="url(#arch-arr)"></path>
+        <path class="edge-dash" d="M300 84 L84 84 L84 358 L116 358" marker-end="url(#arch-arr)"></path>
+        <text class="elbl" x="70" y="220" text-anchor="middle" transform="rotate(-90 70 220)">signed checkpoints</text>
+
+        <text class="note" x="36" y="424">Only the canonical log and anchors are authoritative — deleting every derived artifact loses nothing.</text>
+      </svg>
+      <figcaption>Layering follows the plan: CLI → core → canonical log / derived layer, with anchors holding external attestations (dashed).</figcaption>
+    </figure>
+
+    <h3>Trust &amp; threat model</h3>
+    <p>The design targets <strong>tamper-evidence</strong>, not tamper-proofing against someone who controls the machine. Each threat is mitigated at a specific phase:</p>
+    <div class="table-wrap">
+      <table>
+        <caption class="sr-only">Threat model with mitigations and phases</caption>
+        <thead>
+          <tr><th>Threat</th><th>Mitigation</th><th>Phase</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Accidental corruption / crash mid-write</td><td>Atomic append, recovery rules, <code>verify</code></td><td class="dim">1</td></tr>
+          <tr><td>Careless edit of a past entry</td><td>Hash chain breaks at that point</td><td class="dim">1</td></tr>
+          <tr><td>Deliberate edit + recomputed hashes</td><td>Signed checkpoints, external anchors</td><td class="dim">5</td></tr>
+          <tr><td>Tail truncation / full chain rewrite</td><td>Anchored head-hash comparison</td><td class="dim">5</td></tr>
+          <tr><td>Backdating</td><td>OpenTimestamps on sealed segments</td><td class="dim">5</td></tr>
+          <tr><td>Signing-key compromise</td><td>Key stored off the journal machine where possible; checkpoints still catch past rewrites</td><td class="dim">5</td></tr>
+          <tr><td>Content you later want gone</td><td>Salted-commitment redaction</td><td class="dim">5</td></tr>
+          <tr><td>Private entries leaking to an AI provider</td><td><code>private</code> flag excluded from LLM view and MCP</td><td class="dim">4, 6</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ================= 02 PROJECT STRUCTURE ================= -->
+  <section class="doc" id="structure" data-reveal>
+    <div class="sec-head"><span class="sec-num">02</span><h2>Project Structure</h2></div>
+    <p class="lede">The repo today is spec-first — only <code>README.md</code> (the plan) exists. The plan is deliberately language-agnostic, so the following is a <strong>draft target layout</strong> derived from its layering and phase order, not a spec requirement. Module boundaries are the important part; the directory names are a suggestion.</p>
+
+    <pre><code>zephyr/
+├─ spec/        # Phase 0 — the byte-level contract &amp; test vectors (source of truth for correctness)
+├─ cli/         # Command surface: log, today, search, edit, verify, export, ask, checkpoint, mcp…
+├─ core/        # Canonical log: the only code that touches the format
+│  ├─ records/  #   header/payload encoding, canonical bytes, hash chain
+│  ├─ segments/ #   monthly segments, blocks, sealed footers, cross-segment linking
+│  └─ io/       #   atomic append, crash recovery (incomplete trailing record handling)
+├─ derived/     # Rebuildable views — never authoritative
+│  ├─ llm/      #   deterministic LLM-view renderer (fixed rendering rules)
+│  ├─ search/   #   full-text index, rebuildable from the log
+│  ├─ digests/  #   weekly/monthly summaries (AI reads these first)
+│  └─ profile/  #   AI-maintained living profile + extracted entities
+├─ ai/          # MCP server — read-only by default, provenance header on every response
+└─ anchors/     # Signed checkpoints → private git / second device; OpenTimestamps proofs</code></pre>
+
+    <h3>Responsibility of each major part</h3>
+    <div class="table-wrap">
+      <table>
+        <caption class="sr-only">Module responsibilities</caption>
+        <thead>
+          <tr><th>Module</th><th>Owns</th><th>Must never</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>spec/</code></td><td>Record header/payload layout, canonical encoding, exact hash inputs, segment/footer layout, crash-recovery rules, LLM-view rendering rules, test vectors.</td><td>Drift from implemented behavior — vectors are the gate.</td></tr>
+          <tr><td><code>cli/</code></td><td>Argument parsing, view rendering, UX (confirmations, output).</td><td>Touch the log format directly; skip <code>verify</code> before AI-facing output.</td></tr>
+          <tr><td><code>core/</code></td><td>Everything in the byte contract: encoding, chaining, segmentation, atomic append, recovery.</td><td>Do I/O without a defined failure mode; modify sealed segments (except redaction).</td></tr>
+          <tr><td><code>derived/</code></td><td>Search index, LLM view, digests, profile, entities — all with provenance (range + head hash).</td><td>Be treated as authoritative; serve unverified data.</td></tr>
+          <tr><td><code>ai/</code></td><td>MCP tool surface (<code>get_entries</code>, <code>search</code>, <code>get_digest</code>, <code>get_profile</code>, <code>verify_status</code>; <code>add_entry</code> off by default).</td><td>Serve when the chain is invalid; leak <code>private</code>/redacted entries; be writable via an AI-supplied request.</td></tr>
+          <tr><td><code>anchors/</code></td><td>Checkpoint signing/publishing, OpenTimestamps attestations, anchor comparison in <code>verify</code>.</td><td>Store content — hashes only.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout">
+      <p><strong>Dependency direction is one-way:</strong> <code>cli</code> → <code>core</code> → <code>spec</code> (via vectors); <code>derived</code> and <code>ai</code> consume the log through core’s verified reads; <code>anchors</code> only publish and compare hashes. Nothing derived may write back into the canonical log — the one sanctioned exception is the explicit, logged redaction mechanism.</p>
+    </div>
+  </section>
+
+  <!-- ================= 03 DOMAIN / DATA MODEL ================= -->
+  <section class="doc" id="data-model" data-reveal>
+    <div class="sec-head"><span class="sec-num">03</span><h2>Domain / Data Model</h2></div>
+    <p class="lede">The core entity is the <strong>record</strong>: a chained, immutable header plus a committed, redactable payload. Records group into sealed <strong>segments</strong>; <strong>checkpoints</strong> and <strong>anchors</strong> externalize trust; <strong>derived artifacts</strong> reference the log by provenance rather than owning it.</p>
+
+    <h3>Core entities</h3>
+    <div class="table-wrap">
+      <table>
+        <caption class="sr-only">Core entities and their roles</caption>
+        <thead>
+          <tr><th>Entity</th><th>What it is</th><th>Key properties</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Record</strong></td>
+            <td>One append-only event. Types: <code>entry</code>, <code>amendment</code>, <code>tombstone</code>, <code>redaction</code>, <code>checkpoint</code>.</td>
+            <td><code>seq</code> monotonic from 0; header chained via <code>record_hash</code>; payload bound by <code>commitment</code>.</td>
+          </tr>
+          <tr>
+            <td><strong>Segment</strong></td>
+            <td>Group of records (default: one per calendar month). Sealed with a footer; the next segment’s chain starts from the previous segment’s head.</td>
+            <td>Footer: first/last <code>seq</code>, record count, segment head hash, footer hash. Never modified after sealing except payload-region redaction.</td>
+          </tr>
+          <tr>
+            <td><strong>Block</strong></td>
+            <td>Compressed group of payloads within a segment (codec named in the spec; zstd recommended).</td>
+            <td>Keeps headers cheap to scan and payloads compact.</td>
+          </tr>
+          <tr>
+            <td><strong>Checkpoint</strong></td>
+            <td>A signed attestation of log state: head hash, record count, time (Ed25519).</td>
+            <td>Published to anchors; compared during <code>verify</code> to catch tail truncation or full rewrites.</td>
+          </tr>
+          <tr>
+            <td><strong>Anchor</strong></td>
+            <td>External storage of attestations: private git repo / second device (phase 5), OpenTimestamps on sealed segment heads (after format is stable).</td>
+            <td>Hashes only — never content.</td>
+          </tr>
+          <tr>
+            <td><strong>Derived artifact</strong></td>
+            <td>Search index, digests, profile, entities, LLM view output.</td>
+            <td>Provenance: log range + head hash. Invalidated by new entries (staleness) and by redaction (regenerated).</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Record layout</h3>
+    <div class="grid-2">
+      <div class="card">
+        <h3>Header — chained, never modified</h3>
+        <div class="table-wrap" style="margin:0">
+          <table>
+            <thead><tr><th>Field</th><th>Notes</th></tr></thead>
+            <tbody>
+              <tr><td><code>version</code></td><td class="dim">format + hash-algorithm identifier</td></tr>
+              <tr><td><code>type</code></td><td class="dim">entry · amendment · tombstone · redaction · checkpoint</td></tr>
+              <tr><td><code>seq</code></td><td class="dim">monotonic sequence, starts at 0</td></tr>
+              <tr><td><code>timestamp</code></td><td class="dim">UTC, millisecond precision</td></tr>
+              <tr><td><code>tz_offset</code></td><td class="dim">minutes from UTC</td></tr>
+              <tr><td><code>flags</code></td><td class="dim">bit field; reserved <code>private</code> bit; unused bits zero</td></tr>
+              <tr><td><code>target_seq</code></td><td class="dim">for amendment / tombstone / redaction: the affected record</td></tr>
+              <tr><td><code>commitment</code></td><td class="dim"><code>SHA-256(salt ‖ payload)</code></td></tr>
+              <tr><td><code>record_hash</code></td><td class="dim"><code>SHA-256(canonical header ‖ previous record_hash)</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Payload — committed, redactable</h3>
+        <div class="table-wrap" style="margin:0">
+          <table>
+            <thead><tr><th>Field</th><th>Notes</th></tr></thead>
+            <tbody>
+              <tr><td><code>salt</code></td><td class="dim">random 16+ bytes, per record — a short, guessable entry can’t be recovered from the leftover commitment</td></tr>
+              <tr><td><code>text</code></td><td class="dim">UTF-8, NFC-normalized</td></tr>
+              <tr><td><code>tags</code></td><td class="dim">optional list of strings</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p style="font-size:14px; color:var(--text-2); margin-top:14px">Stored in separate regions so redaction physically removes <code>text</code> + <code>salt</code> without ever touching the chain.</p>
+      </div>
+    </div>
+
+    <div class="callout">
+      <p><strong>The central seam:</strong> the chain depends only on headers (which include the commitment), never on the payload directly. The payload is verified against its commitment. This is what makes redaction possible without breaking the chain.</p>
+    </div>
+
+    <h3>Data model diagram</h3>
+    <figure class="card diagram-card">
+      <svg class="diagram" viewBox="0 0 760 500" role="img" aria-labelledby="dm-title dm-desc">
+        <title id="dm-title">Zephyr data model diagram</title>
+        <desc id="dm-desc">A record consists of an immutable chained header and a committed redactable payload, linked into a hash chain. Records are stored in monthly segments containing compressed blocks and a sealed footer. A segment’s head hash is signed into a checkpoint, which is published to anchors: a private git repository, a second device, and OpenTimestamps. The verified log is rendered into the rebuildable derived layer — LLM view, search index, digests, profile and entities, and the MCP server — and every derived artifact records the log range and head hash it came from.</desc>
+        <defs>
+          <marker id="dm-arr" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path class="arrhead" d="M0,0 L10,5 L0,10 z"></path>
+          </marker>
+        </defs>
+
+        <!-- record hash chain loop -->
+        <path class="edge-dash" d="M36 76 L20 76 L20 188 L34 188" marker-end="url(#dm-arr)"></path>
+        <text class="elbl" x="13" y="132" text-anchor="middle" transform="rotate(-90 13 132)">hash chain</text>
+
+        <!-- RECORD -->
+        <rect class="box" x="36" y="36" width="236" height="196" rx="12"></rect>
+        <text class="lbl" x="154" y="62" text-anchor="middle">Record</text>
+        <text class="tiny" x="154" y="80" text-anchor="middle">entry · amendment · tombstone</text>
+        <text class="tiny" x="154" y="94" text-anchor="middle">redaction · checkpoint</text>
+        <rect class="box-sub" x="56" y="106" width="196" height="52" rx="8"></rect>
+        <text class="sub" x="154" y="127" text-anchor="middle">Header — chained, immutable</text>
+        <text class="tiny" x="154" y="143" text-anchor="middle">seq · ts · flags · commitment · record_hash</text>
+        <rect class="box-sub" x="56" y="170" width="196" height="52" rx="8"></rect>
+        <text class="sub" x="154" y="191" text-anchor="middle">Payload — committed, redactable</text>
+        <text class="tiny" x="154" y="207" text-anchor="middle">salt · text (NFC) · tags</text>
+
+        <!-- SEGMENT -->
+        <rect class="box-auth" x="340" y="36" width="196" height="196" rx="12"></rect>
+        <text class="lbl" x="438" y="62" text-anchor="middle">Segment</text>
+        <text class="tiny" x="438" y="80" text-anchor="middle">default: one per month · sealed</text>
+        <rect class="box-sub" x="360" y="94" width="156" height="50" rx="8"></rect>
+        <text class="sub" x="438" y="114" text-anchor="middle">Blocks</text>
+        <text class="tiny" x="438" y="130" text-anchor="middle">compressed payloads (zstd)</text>
+        <text class="tiny" x="438" y="172" text-anchor="middle">footer: seq range · count</text>
+        <text class="tiny" x="438" y="186" text-anchor="middle">· segment head hash · footer hash</text>
+        <text class="tiny" x="438" y="214" text-anchor="middle">next segment chains from previous head</text>
+
+        <!-- CHECKPOINT -->
+        <rect class="box" x="600" y="36" width="124" height="96" rx="12"></rect>
+        <text class="lbl" x="662" y="64" text-anchor="middle">Checkpoint</text>
+        <text class="tiny" x="662" y="84" text-anchor="middle">signed head hash</text>
+        <text class="tiny" x="662" y="98" text-anchor="middle">· count · time</text>
+        <text class="tiny" x="662" y="112" text-anchor="middle">Ed25519</text>
+
+        <!-- ANCHORS -->
+        <rect class="box-auth" x="600" y="180" width="124" height="110" rx="12"></rect>
+        <text class="lbl" x="662" y="206" text-anchor="middle">Anchors</text>
+        <text class="tiny" x="662" y="226" text-anchor="middle">private git repo</text>
+        <text class="tiny" x="662" y="240" text-anchor="middle">second device</text>
+        <text class="tiny" x="662" y="254" text-anchor="middle">OpenTimestamps</text>
+        <text class="tiny" x="662" y="274" text-anchor="middle">hashes only</text>
+
+        <!-- DERIVED -->
+        <rect class="box" x="340" y="290" width="384" height="170" rx="12"></rect>
+        <text class="lbl" x="532" y="316" text-anchor="middle">Derived layer — rebuildable</text>
+        <text class="sub" x="364" y="340">LLM view (deterministic renderer)</text>
+        <text class="sub" x="364" y="362">Search index</text>
+        <text class="sub" x="364" y="384">Digests · profile · entities</text>
+        <text class="sub" x="364" y="406">MCP server (read-only by default)</text>
+        <text class="tiny" x="532" y="438" text-anchor="middle">every artifact records: log range + head hash · invalidated by redaction</text>
+
+        <!-- edges -->
+        <path class="edge draw" pathLength="1" d="M272 100 L336 100" marker-end="url(#dm-arr)"></path>
+        <text class="elbl" x="304" y="92" text-anchor="middle">grouped into</text>
+        <path class="edge draw" pathLength="1" d="M538 84 L596 84" marker-end="url(#dm-arr)"></path>
+        <text class="elbl" x="567" y="76" text-anchor="middle">head hash</text>
+        <path class="edge draw" pathLength="1" d="M662 138 L662 176" marker-end="url(#dm-arr)"></path>
+        <text class="elbl" x="676" y="162">published</text>
+        <path class="edge-dash" d="M598 230 L470 230 L470 234" marker-end="url(#dm-arr)"></path>
+        <text class="elbl" x="534" y="222" text-anchor="middle">head hash + OTS proof</text>
+        <path class="edge draw" pathLength="1" d="M160 234 L400 286" marker-end="url(#dm-arr)"></path>
+        <text class="elbl" x="272" y="270" text-anchor="middle">verified → rendered</text>
+
+        <text class="note" x="36" y="488">Chain depends on headers only; payloads verify against their commitment. Only the canonical log and anchors are authoritative.</text>
+      </svg>
+      <figcaption>Entities and relationships. Dashed: the hash chain (record ↔ record), and anchor attestations back onto the segment head.</figcaption>
+    </figure>
+  </section>
+
+  <!-- ================= 04 INTERFACES & CONTRACTS ================= -->
+  <section class="doc" id="interfaces" data-reveal>
+    <div class="sec-head"><span class="sec-num">04</span><h2>Interfaces &amp; Contracts</h2></div>
+    <p class="lede">Four interfaces matter: the CLI (human in), the MCP server (AI in), the canonical byte contract (implementation in), and the anchors (trust out). The byte contract is the strictest of all — two independent implementations must produce byte-identical records for the same input.</p>
+
+    <h3>CLI surface</h3>
+    <div class="table-wrap">
+      <table>
+        <caption class="sr-only">CLI commands grouped by function</caption>
+        <thead>
+          <tr><th>Command</th><th>Purpose</th><th>Group</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>zephyr "text"</code></td><td>Quick log — the ~3-second path</td><td class="dim">Capture</td></tr>
+          <tr><td><code>zephyr log -t tag "text"</code></td><td>Log with optional tags (nothing is required)</td><td class="dim">Capture</td></tr>
+          <tr><td><code>zephyr today</code> · <code>yesterday</code> · <code>week</code></td><td>Time-range views</td><td class="dim">Read</td></tr>
+          <tr><td><code>zephyr on 2026-09-14</code></td><td>A specific date (local-timezone aware)</td><td class="dim">Read</td></tr>
+          <tr><td><code>zephyr search "query"</code></td><td>Keyword search</td><td class="dim">Read</td></tr>
+          <tr><td><code>zephyr edit &lt;id&gt;</code></td><td>Amendment (new record, <code>target_seq</code>)</td><td class="dim">Modify</td></tr>
+          <tr><td><code>zephyr rm &lt;id&gt;</code></td><td>Tombstone (hidden from default views)</td><td class="dim">Modify</td></tr>
+          <tr><td><code>zephyr redact &lt;id&gt;</code></td><td>Redaction — confirmation required</td><td class="dim">Modify</td></tr>
+          <tr><td><code>zephyr verify</code></td><td>Full integrity check; reports the exact failure position</td><td class="dim">Integrity</td></tr>
+          <tr><td><code>zephyr export --for-ai [range]</code></td><td>Deterministic LLM view</td><td class="dim">AI</td></tr>
+          <tr><td><code>zephyr ask "question"</code></td><td>Retrieval + LLM answer (explicit network action)</td><td class="dim">AI</td></tr>
+          <tr><td><code>zephyr recap week|month</code></td><td>Digest</td><td class="dim">AI</td></tr>
+          <tr><td><code>zephyr checkpoint</code></td><td>Sign and publish a checkpoint</td><td class="dim">Anchors</td></tr>
+          <tr><td><code>zephyr mcp</code></td><td>Start the read-only AI server</td><td class="dim">Anchors</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Internal boundaries</h3>
+    <div class="table-wrap">
+      <table>
+        <caption class="sr-only">Internal boundaries and their contracts</caption>
+        <thead>
+          <tr><th>Boundary</th><th>Contract</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Canonical byte contract</strong></td>
+            <td>One fully specified byte layout: fixed field order, fixed integer widths and endianness, length-prefixed strings, no optional ambiguity. The spec states exactly which bytes are hashed. Two independent implementations must produce byte-identical records and hashes for the same input — enforced by Phase 0 test vectors.</td>
+          </tr>
+          <tr>
+            <td><strong>Header / payload seam</strong></td>
+            <td>The chain covers headers only (including the commitment); the payload verifies against its commitment. Redaction is the only sanctioned mutation of sealed data, and it can only touch the payload region.</td>
+          </tr>
+          <tr>
+            <td><strong>CLI / core</strong></td>
+            <td>The CLI never touches the format; it calls append / verify / read. <em>(Draft interpretation of the layering — the plan specifies layers, not function signatures.)</em></td>
+          </tr>
+          <tr>
+            <td><strong>Canonical / derived</strong></td>
+            <td>Verify before trust: any consumer (CLI views, LLM export, MCP) checks integrity before serving data. Every derived artifact records the log range and head hash it was derived from, so stale or unsupported summaries are detectable. Redacting an entry invalidates and regenerates derived artifacts built from it.</td>
+          </tr>
+          <tr>
+            <td><strong>Core / anchors</strong></td>
+            <td>Checkpoints carry head hash, count, and time, signed with Ed25519. Anchors hold hashes only — never content. <code>verify</code> compares against anchors when present.</td>
+          </tr>
+          <tr>
+            <td><strong>Crash-safety contract</strong></td>
+            <td>Appends are atomic from the reader’s view: write the complete record, flush to durable storage, then advance the head pointer. On startup, an incomplete trailing record is detected and discarded or quarantined; it never corrupts earlier records.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>External integrations &amp; events</h3>
+    <div class="table-wrap">
+      <table>
+        <caption class="sr-only">External integrations</caption>
+        <thead>
+          <tr><th>Integration</th><th>Direction</th><th>Contract</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Private git repository / second device</strong></td>
+            <td>Out (publish checkpoints), in (fetch for <code>verify</code>)</td>
+            <td>Checkpoint files only — head hash, count, time, Ed25519 signature. No journal content ever leaves the machine through this path.</td>
+          </tr>
+          <tr>
+            <td><strong>OpenTimestamps</strong></td>
+            <td>In (attestations of sealed segment head hashes)</td>
+            <td>Added after the format is stable. A timestamp proof must verify independently of Zephyr — external, public, timestamped evidence of existence.</td>
+          </tr>
+          <tr>
+            <td><strong>LLM provider</strong></td>
+            <td>Out — only via explicit <code>export --for-ai</code> / <code>ask</code></td>
+            <td>The renderer refuses to run on a log that fails <code>verify</code> (or clearly labels output as unverified, if the user opts in). <code>private</code> entries are never included. Local logging requires no network at all.</td>
+          </tr>
+          <tr>
+            <td><strong>MCP clients</strong> (AI agents/IDEs)</td>
+            <td>In — tool calls to <code>zephyr mcp</code></td>
+            <td>Tools: <code>get_entries(from, to)</code>, <code>search(query, limit)</code>, <code>get_digest(period)</code>, <code>get_profile()</code>, <code>verify_status()</code>. <code>add_entry(text)</code> exists but is <strong>off by default</strong> and must be explicitly enabled; it cannot be enabled by an AI-supplied request. Every response carries the provenance header; an invalid chain is reported, not served silently.</td>
+          </tr>
+          <tr>
+            <td><strong>Compression codec</strong> (zstd recommended)</td>
+            <td>Internal, but named in the spec</td>
+            <td>The codec choice is part of the byte contract — it must be standard and widely available.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>LLM view contract</h3>
+    <p>The LLM view is a <strong>deterministic renderer</strong> that turns verified records into the smallest reasonable text — fixed by the spec so output is byte-identical for the same input:</p>
+    <pre><code># 2026-09-14 Mon
+09:32 fixed the auth bug, finally
+14:10 [work] shipped v2 to client
+16:45 (edited) call with dentist, moved to Thursday
+17:20 [redacted]</code></pre>
+    <ul>
+      <li>Date header once per day; times in the entry’s local timezone.</li>
+      <li>Latest amendment text shown; tombstoned entries omitted; redacted entries shown as a marker (or omitted, configurable).</li>
+      <li><code>private</code> entries are never included.</li>
+      <li>Output includes a one-line provenance header: the log range and head hash it was rendered from.</li>
+    </ul>
+  </section>
+
+  <!-- ================= 05 KEY FLOWS ================= -->
+  <section class="doc" id="flows" data-reveal>
+    <div class="sec-head"><span class="sec-num">05</span><h2>Key Flows</h2></div>
+    <p class="lede">Six operations cover the system: capturing, trusting, correcting, removing, asking, and anchoring. Note the invariant in every AI-facing flow: <strong>verify first, then serve</strong>.</p>
+
+    <div class="grid-2">
+      <div class="card flow" data-reveal>
+        <div class="flow-head"><span class="flow-name">Quick log</span> <code>zephyr "text"</code></div>
+        <ol class="steps">
+          <li>NFC-normalize the text.</li>
+          <li>Build the payload: random 16+ byte <code>salt</code>, text, optional tags.</li>
+          <li>Compute <code>commitment = SHA-256(salt ‖ payload)</code>.</li>
+          <li>Build the header: <code>seq</code>, timestamp, <code>tz_offset</code>, flags, and <code>record_hash = SHA-256(header ‖ previous hash)</code>.</li>
+          <li>Atomic append: write the complete record, flush to durable storage, advance the head pointer. ~3 seconds, no required fields.</li>
+        </ol>
+      </div>
+
+      <div class="card flow" data-reveal style="--d:0.05s">
+        <div class="flow-head"><span class="flow-name">Verify</span> <code>zephyr verify</code></div>
+        <ol class="steps">
+          <li>Load segment footers; validate footer hashes and cross-segment chain links.</li>
+          <li>If anchors exist, compare the head hash against the latest checkpoint / OpenTimestamps proof.</li>
+          <li>Walk the chain, recomputing each <code>record_hash</code>.</li>
+          <li>Verify each payload against its commitment.</li>
+          <li>Report the <strong>exact position</strong> of any failure; report redacted records as “redacted,” not as failures.</li>
+        </ol>
+      </div>
+
+      <div class="card flow" data-reveal>
+        <div class="flow-head"><span class="flow-name">Edit / delete</span> <code>edit &lt;id&gt;</code> · <code>rm &lt;id&gt;</code></div>
+        <ol class="steps">
+          <li>Resolve the target record by id to a <code>seq</code>.</li>
+          <li>Append an <code>amendment</code> (new text) or <code>tombstone</code> with <code>target_seq</code> — a normal chained record.</li>
+          <li>Views resolve to the latest amendment; tombstoned entries are omitted from default views.</li>
+          <li>The original record remains in the log untouched — <code>verify</code> still passes.</li>
+        </ol>
+      </div>
+
+      <div class="card flow" data-reveal style="--d:0.05s">
+        <div class="flow-head"><span class="flow-name">Redact</span> <code>redact &lt;id&gt;</code></div>
+        <ol class="steps">
+          <li>Require explicit confirmation.</li>
+          <li>Physically remove the target’s <code>text</code> and <code>salt</code> from the payload region — headers and commitment untouched.</li>
+          <li>Append a signed <code>redaction</code> record noting what was removed and when; amendments quoting the redacted text are redacted too.</li>
+          <li>The chain still verifies — <code>verify</code> reports the entry as <strong>redacted</strong>, not a failure.</li>
+          <li>Invalidate and regenerate derived artifacts built from the entry. (Old backups may still hold the content; anchors never do.)</li>
+        </ol>
+      </div>
+
+      <div class="card flow" data-reveal>
+        <div class="flow-head"><span class="flow-name">Ask</span> <code>zephyr ask "question"</code></div>
+        <ol class="steps">
+          <li>Run integrity check first — refuse (or label) if the log fails <code>verify</code>.</li>
+          <li>Render the LLM view for the relevant range: <code>private</code> excluded, provenance header included.</li>
+          <li>Retrieve relevant material — digests first, raw entries only when needed (saves context).</li>
+          <li>Send to the LLM provider — an explicit, user-initiated network action.</li>
+          <li>Return the answer to the user.</li>
+        </ol>
+      </div>
+
+      <div class="card flow" data-reveal style="--d:0.05s">
+        <div class="flow-head"><span class="flow-name">Checkpoint</span> <code>zephyr checkpoint</code></div>
+        <ol class="steps">
+          <li>Collect current state: head hash, record count, time.</li>
+          <li>Sign with Ed25519 (key stored off the journal machine where possible).</li>
+          <li>Publish to the private git repository or second device.</li>
+          <li>After the format is stable: add OpenTimestamps attestations on sealed segment head hashes — independent, verifiable timestamps.</li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 06 ARCHITECTURE DECISIONS ================= -->
+  <section class="doc" id="decisions" data-reveal>
+    <div class="sec-head"><span class="sec-num">06</span><h2>Architecture Decisions</h2></div>
+    <p class="lede">The decisions that give the design its shape. “Agreed” items are frozen in the plan; the rest carry their trade-offs explicitly. Rejected alternatives are listed where the plan names them.</p>
+
+    <div class="table-wrap">
+      <table>
+        <caption class="sr-only">Architecture decisions with rationale, trade-offs, and rejected alternatives</caption>
+        <thead>
+          <tr><th>Decision</th><th>Rationale</th><th>Trade-off / rejected alternative</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>SHA-256</strong> for hashing, with a <code>hash_alg</code>/format-version byte in every header</td>
+            <td>Universally available; compatible with OpenTimestamps and most signing tools; stable for decades.</td>
+            <td>Faster hashes (e.g. BLAKE3) rejected on ecosystem grounds. The version byte makes a future migration possible without ambiguity.</td>
+          </tr>
+          <tr>
+            <td><strong>Ed25519</strong> for signatures</td>
+            <td>Small keys/signatures, fast verification, broad tooling support.</td>
+            <td>—</td>
+          </tr>
+          <tr>
+            <td><strong>Chain on headers only</strong>; payloads bound by salted commitments</td>
+            <td>Makes redaction possible without breaking the chain — the single most important structural decision.</td>
+            <td>Chaining the payload directly would be simpler but makes “content you later want gone” impossible. Payload integrity is commitment-bound, not chain-bound.</td>
+          </tr>
+          <tr>
+            <td><strong>Salted-commitment redaction</strong> + signed redaction records</td>
+            <td>Content and salt physically removed; commitment and header stay, so the log still verifies; the record of removal is itself signed and dated.</td>
+            <td>The salt prevents a short, guessable entry from being recovered from the leftover commitment. Trade-off: redaction only affects the live copy — old backups may still hold the content (anchors never do, since they hold only hashes).</td>
+          </tr>
+          <tr>
+            <td><strong>Append-only history</strong> — corrections are new records</td>
+            <td>Any edit, deletion, or reordering is detectable; nothing is rewritten.</td>
+            <td>In-place edits rejected: they destroy the evidence. Views must resolve latest-amendment; storage grows monotonically.</td>
+          </tr>
+          <tr>
+            <td><strong>Anchoring in two stages</strong>: private git checkpoints (phase 5) → OpenTimestamps on sealed segment heads (after format stable)</td>
+            <td>Git is simple and self-hosted — no external service. OTS adds independent, public, verifiable timestamps without trust in Zephyr itself.</td>
+            <td><strong>Rejected:</strong> publishing or storing entries on a public blockchain (only hashes are ever published) and any hosted service / multi-user sync (non-goals). Also rejected: true tamper-<em>proofing</em> against the machine owner — the goal is tamper-<em>evidence</em> backed by external anchors.</td>
+          </tr>
+          <tr>
+            <td><strong>Language-agnostic spec + byte-level test vectors</strong> (Phase 0 before any implementation)</td>
+            <td>Correctness is defined by spec plus vectors, not by a reference implementation; any language can implement it; two readers from the spec alone must produce identical bytes.</td>
+            <td>Front-loads cost into Phase 0, and any encoding ambiguity is a phase-killer — which is why the gate requires “no field has ambiguous encoding.”</td>
+          </tr>
+          <tr>
+            <td><strong>Deterministic LLM view</strong> (fixed rendering rules, byte-identical output)</td>
+            <td>Token-efficient, reproducible, cross-implementation comparable; the renderer refuses to run on a failing log.</td>
+            <td>A fixed format is less flexible than free-form summarization. Semantic search is deliberately deferred to Phase 8 with a pre-committed “must beat keyword search” gate — otherwise skipped.</td>
+          </tr>
+          <tr>
+            <td><strong>Store every <code>record_hash</code></strong> (initial design)</td>
+            <td>Exact tamper localization — <code>verify</code> can point at the precise record.</td>
+            <td>Costs space. Phase 3 measures bytes per entry against a target and, if missed, evaluates implied hashes with per-block checkpoints and re-runs the tamper tests.</td>
+          </tr>
+          <tr>
+            <td><strong>Local-first; LLM access is an explicit action</strong></td>
+            <td>No network is required to log; nothing is sent to a provider without an explicit user command.</td>
+            <td>AI features are opt-in per use; the MCP write tool (<code>add_entry</code>) is off by default and cannot be enabled by an AI-supplied request.</td>
+          </tr>
+          <tr>
+            <td><strong>Segments (monthly) + block compression</strong></td>
+            <td>Bounded file growth, cheap per-segment sealing and anchoring, zstd for compact storage; headers stay cheap to scan.</td>
+            <td>Monthly granularity is an assumption to confirm in Phase 0. Optional: Merkle roots per segment (phase 5) to prove a single entry without verifying the whole log.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ================= 07 IMPLEMENTATION ROADMAP ================= -->
+  <section class="doc" id="roadmap" data-reveal>
+    <div class="sec-head"><span class="sec-num">07</span><h2>Implementation Roadmap</h2></div>
+    <p class="lede">Phases are strictly dependency-ordered — each builds on the previous gate passing. The plan’s rule: <strong>do not start the next phase until the gate passes.</strong></p>
+
+    <div class="callout">
+      <p><strong>Sequencing logic:</strong> spec first (0) → trust the local log (1) → read and correct it (2) → make it compact (3) → make it LLM-readable (4) → make rewrites externally detectable (5) → let an AI read it (6) → let an AI know you (7) → optional semantic search (8).</p>
+    </div>
+
+    <ol class="timeline">
+      <li class="phase" data-reveal>
+        <span class="phase-dot"></span>
+        <div class="phase-head"><span class="phase-name">Phase 0 — Spec and test vectors</span></div>
+        <p class="phase-line"><span class="badge"><span class="dot"></span>Deliver</span>Written byte-level spec (records, encoding, segment/footer layout, crash recovery, LLM-view rules) · test vectors including amendment/tombstone/redaction and deliberately corrupted cases · decisions frozen.</p>
+        <p class="phase-line dim"><span class="badge ok"><span class="dot"></span>Gate</span>Hand-computed hash matches vectors · two readers working only from the spec produce identical bytes · no field has ambiguous encoding.</p>
+      </li>
+      <li class="phase" data-reveal>
+        <span class="phase-dot"></span>
+        <div class="phase-head"><span class="phase-name">Phase 1 — Append and verify</span></div>
+        <p class="phase-line"><span class="badge"><span class="dot"></span>Deliver</span><code>log</code> + <code>verify</code> over a chained log (one segment) · atomic append · crash recovery.</p>
+        <p class="phase-line dim"><span class="badge ok"><span class="dot"></span>Gate</span>All Phase 0 vectors pass · byte-flip / delete / reorder / forged-insert / timestamp-alter each fail <code>verify</code> at the exact position · kill-mid-write recovers cleanly.</p>
+      </li>
+      <li class="phase" data-reveal>
+        <span class="phase-dot"></span>
+        <div class="phase-head"><span class="phase-name">Phase 2 — Reading and amendments</span></div>
+        <p class="phase-line"><span class="badge"><span class="dot"></span>Deliver</span><code>today</code> · <code>yesterday</code> · <code>week</code> · <code>on &lt;date&gt;</code> · <code>search</code> · <code>edit</code> · <code>rm</code> · amendment and tombstone records.</p>
+        <p class="phase-line dim"><span class="badge ok"><span class="dot"></span>Gate</span>Golden-output tests on a fixture journal · edits/deletes change the view while <code>verify</code> still passes and originals remain · timezone and midnight-boundary cases correct.</p>
+      </li>
+      <li class="phase" data-reveal>
+        <span class="phase-dot"></span>
+        <div class="phase-head"><span class="phase-name">Phase 3 — Segments and storage efficiency</span></div>
+        <p class="phase-line"><span class="badge"><span class="dot"></span>Deliver</span>Monthly segments · block compression · sealed footers · payload-region separation · cross-segment chain linking.</p>
+        <p class="phase-line dim"><span class="badge ok"><span class="dot"></span>Gate</span>100k-entry round trip identical · <code>verify</code> across segment boundaries; tampering with a sealed segment or footer detected · bytes-per-entry meets the Phase 0 target (else evaluate implied hashes + block checkpoints and re-test).</p>
+      </li>
+      <li class="phase" data-reveal>
+        <span class="phase-dot"></span>
+        <div class="phase-head"><span class="phase-name">Phase 4 — LLM view</span></div>
+        <p class="phase-line"><span class="badge"><span class="dot"></span>Deliver</span>Deterministic renderer · <code>export --for-ai</code> · <code>private</code> flag honored.</p>
+        <p class="phase-line dim"><span class="badge ok"><span class="dot"></span>Gate</span>Byte-identical output across runs and independent implementations · tokens-per-entry beats raw JSON by the Phase 0 margin · renderer refuses on a failing log · no <code>private</code> content in output (tested).</p>
+      </li>
+      <li class="phase" data-reveal>
+        <span class="phase-dot"></span>
+        <div class="phase-head"><span class="phase-name">Phase 5 — Signing, redaction, anchoring</span></div>
+        <p class="phase-line"><span class="badge"><span class="dot"></span>Deliver</span>Key generation · Ed25519 signed checkpoints · salted-commitment redaction with signed redaction records · anchor 1: private git (or second device) · anchor 2 (after format stable): OpenTimestamps · optional per-segment Merkle roots.</p>
+        <p class="phase-line dim"><span class="badge ok"><span class="dot"></span>Gate</span>Tail truncation and full-chain rewrite caught by anchor comparison · after redaction: content+salt gone from disk, <code>verify</code> reports “redacted,” commitment unmatchable against guessed content · signatures verify from spec+vectors alone · timestamp proof verifies independently of Zephyr.</p>
+      </li>
+      <li class="phase" data-reveal>
+        <span class="phase-dot"></span>
+        <div class="phase-head"><span class="phase-name">Phase 6 — AI access (MCP)</span></div>
+        <p class="phase-line"><span class="badge"><span class="dot"></span>Deliver</span>Read-only MCP server with the section-8 tools · provenance header on every response.</p>
+        <p class="phase-line dim"><span class="badge ok"><span class="dot"></span>Gate</span>AI client answers date-specific questions correctly against a fixture journal · invalid chain flagged or refused · <code>private</code> and redacted entries never leak through any tool · write tool disabled by default and cannot be enabled by an AI-supplied request.</p>
+      </li>
+      <li class="phase" data-reveal>
+        <span class="phase-dot"></span>
+        <div class="phase-head"><span class="phase-name">Phase 7 — Derived layer</span></div>
+        <p class="phase-line"><span class="badge"><span class="dot"></span>Deliver</span>Rebuildable search index · digests · entities · profile · <code>ask</code> and <code>recap</code> commands.</p>
+        <p class="phase-line dim"><span class="badge ok"><span class="dot"></span>Gate</span>Delete-and-rebuild yields identical results · every digest/profile version records source range + head hash; stale ones detected after new entries or redaction · spot-check question set answered correctly using digests and entries.</p>
+      </li>
+      <li class="phase optional" data-reveal>
+        <span class="phase-dot"></span>
+        <div class="phase-head"><span class="phase-name">Phase 8 — Semantic search</span> <span class="badge"><span class="dot"></span>Optional</span></div>
+        <p class="phase-line"><span class="badge"><span class="dot"></span>Deliver</span>Embeddings over the LLM view, rebuildable from the log.</p>
+        <p class="phase-line dim"><span class="badge ok"><span class="dot"></span>Gate</span>Beats keyword search on a small labeled query set by a margin set in advance — otherwise, skip it.</p>
+      </li>
+    </ol>
+  </section>
+
+  <!-- ================= 08 ACCEPTANCE CRITERIA ================= -->
+  <section class="doc" id="acceptance" data-reveal>
+    <div class="sec-head"><span class="sec-num">08</span><h2>Acceptance Criteria</h2></div>
+    <p class="lede">What “done” means for each major capability — condensed from the phase gates. Each item is pass/fail, not a matter of taste.</p>
+
+    <div class="ac-grid">
+      <div class="card ac" data-reveal>
+        <h3>Capture</h3>
+        <ul class="check">
+          <li><span class="tick"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 5.5 L4 8 L8.5 2.5" fill="none" stroke="var(--green)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></span>A log entry is captured in one command in ~3 seconds, with no required tags or fields.</li>
+          <li><span class="tick"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 5.5 L4 8 L8.5 2.5" fill="none" stroke="var(--green)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></span>Killing the process mid-write leaves a log that recovers cleanly (incomplete trailing record discarded or quarantined).</li>
+        </ul>
+      </div>
+
+      <div class="card ac" data-reveal style="--d:0.05s">
+        <h3>Integrity &amp; verification</h3>
+        <ul class="check">
+          <li><span class="tick"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 5.5 L4 8 L8.5 2.5" fill="none" stroke="var(--green)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></span>Flipping a byte, deleting a record, reordering, inserting a forged record, and altering a timestamp each make <code>verify</code> fail and report the exact position.</li>
+          <li><span class="tick"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 5.5 L4 8 L8.5 2.5" fill="none" stroke="var(--green)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></span><code>verify</code> works across segment boundaries; tampering with a sealed segment or its footer is detected.</li>
+          <li><span class="tick"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 5.5 L4 8 L8.5 2.5" fill="none" stroke="var(--green)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></span>Two implementations working only from the spec produce byte-identical records and hashes for the same input.</li>
+        </ul>
+      </div>
+
+      <div class="card ac" data-reveal>
+        <h3>Editing without rewriting</h3>
+        <ul class="check">
+          <li><span class="tick"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 5.5 L4 8 L8.5 2.5" fill="none" stroke="var(--green)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></span><code>edit</code> and <code>rm</code> change what views show while <code>verify</code> still passes and the original records remain present.</li>
+          <li><span class="tick"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 5.5 L4 8 L8.5 2.5" fill="none" stroke="var(--green)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></span>Timezone and date-boundary cases (entries near midnight, timezone changes) produce correct “on date X” results.</li>
+        </ul>
+      </div>
+
+      <div class="card ac" data-reveal style="--d:0.05s">
+        <h3>Storage efficiency</h3>
+        <ul class="check">
+          <li><span class="tick"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 5.5 L4 8 L8.5 2.5" fill="none" stroke="var(--green)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></span>100k synthetic entries round-trip: write, read back, identical.</li>
+          <li><span class="tick"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 5.5 L4 8 L8.5 2.5" fill="none" stroke="var(--green)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></span>Measured bytes per entry meets the Phase 0 target (baseline: naive JSONL). If missed, the implied-hash + block-checkpoint fallback is evaluated and the tamper tests re-run.</li>
+        </ul>
+      </div>
+
+      <div class="card ac" data-reveal>
+        <h3>LLM view</h3>
+        <ul class="check">
+          <li><span class="tick"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 5.5 L4 8 L8.5 2.5" fill="none" stroke="var(--green)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></span>Same input produces byte-identical output across runs and across independent implementations (vectors).</li>
+          <li><span class="tick"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 5.5 L4 8 L8.5 2.5" fill="none" stroke="var(--green)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></span>Token count per entry beats raw JSON by the margin set in Phase 0.</li>
+          <li><span class="tick"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 5.5 L4 8 L8.5 2.5" fill="none" stroke="var(--green)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></span>The renderer refuses to run on a failing log; no <code>private</code> content ever appears in output (tested).</li>
+        </ul>
+      </div>
+
+      <div class="card ac" data-reveal style="--d:0.05s">
+        <h3>Tamper-evidence &amp; redaction</h3>
+        <ul class="check">
+          <li><span class="tick"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 5.5 L4 8 L8.5 2.5" fill="none" stroke="var(--green)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></span>Truncating the tail, or fully rewriting the log with a new valid chain, is caught by comparison with an anchor.</li>
+          <li><span class="tick"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 5.5 L4 8 L8.5 2.5" fill="none" stroke="var(--green)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></span>After redaction: content and salt are gone from disk, <code>verify</code> passes and reports “redacted,” and the commitment cannot be matched against guessed content.</li>
+          <li><span class="tick"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 5.5 L4 8 L8.5 2.5" fill="none" stroke="var(--green)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></span>Signature verification works from the spec and vectors alone; a timestamp proof verifies independently of Zephyr.</li>
+        </ul>
+      </div>
+
+      <div class="card ac" data-reveal>
+        <h3>AI access (MCP)</h3>
+        <ul class="check">
+          <li><span class="tick"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 5.5 L4 8 L8.5 2.5" fill="none" stroke="var(--green)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></span>Against a fixture journal with known facts, an AI client correctly answers date-specific questions (“what did I do on date X?”).</li>
+          <li><span class="tick"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 5.5 L4 8 L8.5 2.5" fill="none" stroke="var(--green)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></span>The server flags or refuses when the chain is invalid; <code>private</code> and redacted entries never leak through any tool.</li>
+          <li><span class="tick"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 5.5 L4 8 L8.5 2.5" fill="none" stroke="var(--green)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></span>The write tool is disabled by default and cannot be enabled by an AI-supplied request.</li>
+        </ul>
+      </div>
+
+      <div class="card ac" data-reveal style="--d:0.05s">
+        <h3>Derived layer</h3>
+        <ul class="check">
+          <li><span class="tick"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 5.5 L4 8 L8.5 2.5" fill="none" stroke="var(--green)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></span>Deleting the index and rebuilding yields identical results.</li>
+          <li><span class="tick"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 5.5 L4 8 L8.5 2.5" fill="none" stroke="var(--green)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></span>Every digest and profile version records its source range and head hash; a stale one is detected after new entries or redaction.</li>
+          <li><span class="tick"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 5.5 L4 8 L8.5 2.5" fill="none" stroke="var(--green)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></span>Spot-check set: a handful of questions with known correct answers are answered correctly using digests and entries.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="panel ok show" role="status">
+      <span class="icon">
+        <svg viewBox="0 0 64 64" aria-hidden="true">
+          <circle class="ring" cx="32" cy="32" r="29" fill="none" stroke="currentColor" stroke-width="2.5" pathLength="1"></circle>
+          <path class="mark" d="M20 33.5 L28.5 42 L44 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" pathLength="1"></path>
+        </svg>
+      </span>
+      <h3 class="title">Definition of done — v1</h3>
+      <p class="sub">Phases 0–6 passed: you can log in one command, run <code>verify</code> and trust the result, hold external anchors that expose any rewrite, redact content when needed, and ask an AI “what did I do on date X?” through a read-only server that checks integrity first. Phases 7–8 add the “get to know me” intelligence.</p>
+    </div>
+  </section>
+
+  <!-- ================= 09 OPEN QUESTIONS ================= -->
+  <section class="doc" id="questions" data-reveal>
+    <div class="sec-head"><span class="sec-num">09</span><h2>Open Questions</h2></div>
+    <p class="lede">Items the plan explicitly leaves to be finalized, plus ambiguities noticed while drafting (marked <em>inferred</em> — worth confirming, not yet stated in the plan).</p>
+
+    <ul class="open">
+      <li class="open-q" data-reveal>
+        <span class="badge warn"><span class="dot"></span>Phase 0</span>
+        <div>
+          <p class="q"><code>private</code> flag in v1?</p>
+          <p class="d">Whether to include the reserved <code>private</code> header bit in the v1 format. <span class="rec">Recommended: yes</span> — adding a header field later means a format migration.</p>
+        </div>
+      </li>
+      <li class="open-q" data-reveal>
+        <span class="badge warn"><span class="dot"></span>Phase 0</span>
+        <div>
+          <p class="q">Segment granularity</p>
+          <p class="d">Monthly segments are assumed. The byte contract (footer layout, cross-segment linking, OTS unit) depends on the choice, so it must be frozen in the spec.</p>
+        </div>
+      </li>
+      <li class="open-q" data-reveal>
+        <span class="badge warn"><span class="dot"></span>Phase 0</span>
+        <div>
+          <p class="q">Compression codec</p>
+          <p class="d">zstd is recommended. The codec is named in the byte spec, so the decision is permanent for v1. <span class="rec">Recommended: zstd</span> (widely available, strong ratio).</p>
+        </div>
+      </li>
+      <li class="open-q" data-reveal>
+        <span class="badge warn"><span class="dot"></span>Phase 0 → 3</span>
+        <div>
+          <p class="q">Stored vs. implied <code>record_hash</code>es</p>
+          <p class="d">The initial design stores every <code>record_hash</code> for exact tamper localization. Phase 3 measures the cost and may switch to implied hashes with per-block checkpoints if the bytes-per-entry target isn’t met.</p>
+        </div>
+      </li>
+      <li class="open-q" data-reveal>
+        <span class="badge warn"><span class="dot"></span>Phase 5</span>
+        <div>
+          <p class="q">Where the signing key lives</p>
+          <p class="d">Off the journal machine is stronger (key compromise can’t rewrite + re-sign history in one stroke). Needs a concrete mechanism: separate device? hardware key? offline signing flow?</p>
+        </div>
+      </li>
+      <li class="open-q" data-reveal>
+        <span class="badge warn"><span class="dot"></span>Phase 0</span>
+        <div>
+          <p class="q">Numeric targets: bytes per entry, tokens per entry</p>
+          <p class="d">Both gates in Phases 3–4 reference targets “set in Phase 0.” Baseline for bytes: naive JSONL. Baseline for tokens: raw JSON. The numbers need to be chosen before those gates can be judged.</p>
+        </div>
+      </li>
+      <li class="open-q" data-reveal>
+        <span class="badge"><span class="dot"></span>Inferred</span>
+        <div>
+          <p class="q">How redacted entries render in the LLM view</p>
+          <p class="d">The spec says redacted entries are “shown as a marker (or omitted, configurable)” — the configuration surface (flag? config file? per-range option?) is not defined.</p>
+        </div>
+      </li>
+      <li class="open-q" data-reveal>
+        <span class="badge"><span class="dot"></span>Inferred</span>
+        <div>
+          <p class="q"><code>zephyr ask</code> — which LLM, and how is it configured?</p>
+          <p class="d">The plan is provider-agnostic, but says nothing about how the user selects/configures a provider (env var? config file? CLI flag?) or how keys are stored.</p>
+        </div>
+      </li>
+      <li class="open-q" data-reveal>
+        <span class="badge"><span class="dot"></span>Inferred</span>
+        <div>
+          <p class="q">How MCP <code>add_entry</code> is enabled</p>
+          <p class="d">“Off by default and must be explicitly enabled” + “cannot be enabled by an AI-supplied request” implies a user-only mechanism — but config file, CLI flag, or environment variable is unspecified.</p>
+        </div>
+      </li>
+      <li class="open-q" data-reveal>
+        <span class="badge"><span class="dot"></span>Inferred</span>
+        <div>
+          <p class="q">What makes the format “stable” enough for OpenTimestamps?</p>
+          <p class="d">Anchor 2 is gated on “after the format is stable,” but no milestone declares stability. Suggest: after Phase 3 passes and segment/footer bytes are frozen in the spec.</p>
+        </div>
+      </li>
+    </ul>
+  </section>
+
+</main>
+
+<footer>
+  <p class="footer-note">Zephyr — architecture draft, generated from <code>README.md</code> (the complete plan). Sections 2 and the items marked <em>inferred</em> are drafting proposals, not plan text. Design: Apple design language (system typography, token palette, light + dark).</p>
+  <p class="footer-links"><a href="../README.md">README.md</a> · <a href="#top">Back to top</a></p>
+</footer>
+
+<script>
+/* Scroll reveals: base styles are the finished state; this only adds the
+   entry animation for elements that enter the viewport. */
+if (document.documentElement.classList.contains('js-motion')) {
+  var io = new IntersectionObserver(function (entries) {
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i].isIntersecting) {
+        entries[i].target.classList.add('rv-in');
+        io.unobserve(entries[i].target);
+      }
+    }
+  }, { threshold: 0.05, rootMargin: '0px 0px -8% 0px' });
+  var els = document.querySelectorAll('[data-reveal]');
+  for (var j = 0; j < els.length; j++) io.observe(els[j]);
+}
+</script>
+</body>
+</html>
