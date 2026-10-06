@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Zephyr — Architecture &amp; Design Draft</title>
+<title>Zephyr — Architecture · Zig Implementation</title>
 <script>
 /* Progressive enhancement: only hide [data-reveal] elements when JS + motion
    are both available, so no-JS and reduced-motion users see the finished state. */
@@ -183,10 +183,10 @@ a:focus-visible, button:focus-visible, summary:focus-visible {
   justify-content: center;
   align-items: center;
   gap: 10px;
-  margin-bottom: 48px;
+  margin-bottom: 14px;
 }
 .hero-note {
-  margin: -28px 0 40px;
+  margin: 0 0 40px;
   text-align: center;
   font-size: 13px;
   color: var(--text-3);
@@ -271,7 +271,7 @@ a:focus-visible, button:focus-visible, summary:focus-visible {
   letter-spacing: -0.01em;
 }
 .toc-desc {
-  margin-top: 4px;
+  margin: 4px 0 0;
   font-size: 13px;
   line-height: 1.45;
   color: var(--text-2);
@@ -346,7 +346,7 @@ td {
   line-height: 1.45;
 }
 tr:last-child td { border-bottom: 0; }
-td.dim { color: var(--text-2); }
+.dim { color: var(--text-2); }
 
 /* ---------- code ---------- */
 code {
@@ -418,6 +418,7 @@ pre code {
   stroke-width: 1.5;
 }
 .diagram .edge-dash {
+  fill: none;
   stroke-dasharray: 4 4;
   stroke: color-mix(in srgb, var(--text) 30%, transparent);
 }
@@ -463,16 +464,20 @@ pre code {
 }
 
 /* ---------- timeline (roadmap) ---------- */
-.timeline { list-style: none; margin: 18px 0 0; padding: 0; position: relative; }
-.timeline::before {
+.timeline { list-style: none; margin: 18px 0 0; padding: 0; }
+/* Each phase draws the connector down to the next phase's dot, so the line
+   stays correct no matter how much text wraps; the last phase draws none. */
+.phase::after {
   content: "";
   position: absolute;
-  inset-block: 10px;
   inset-inline-start: 6px;
+  top: 16px;
+  bottom: -2px;
   width: 2px;
   border-radius: 1px;
   background: color-mix(in srgb, var(--text) 12%, transparent);
 }
+.phase:last-child::after { display: none; }
 .phase { position: relative; padding: 0 0 26px 42px; }
 .phase:last-child { padding-bottom: 0; }
 .phase-dot {
@@ -573,13 +578,14 @@ pre code {
   display: flex;
   align-items: flex-start;
   gap: 14px;
+  margin: 0;
   padding: 16px 20px;
   border-radius: 16px;
   background: var(--input-bg);
   border: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
 }
 .open-q .badge { flex: none; margin-top: 2px; }
-.open-q .q { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+.open-q .q { margin: 0 0 4px; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
 .open-q .d { margin: 4px 0 0; font-size: 13.5px; line-height: 1.5; color: var(--text-2); }
 .open-q .d .rec { color: var(--accent); font-weight: 600; }
 
@@ -664,10 +670,10 @@ footer p { margin: 0; }
     <p class="tagline">A local-first journal CLI — tamper-evident, compact, and designed from day one to be read by an AI.</p>
     <div class="hero-meta">
       <span class="badge"><span class="dot"></span>Spec-first · no code yet</span>
-      <span class="badge"><span class="dot"></span>Language-agnostic</span>
+      <span class="badge"><span class="dot"></span>Implemented in Zig</span>
       <span class="badge ok"><span class="dot"></span>Phases 0–8</span>
     </div>
-    <p class="hero-note">Architecture draft generated from <code>README.md</code> (the complete plan) · sections below draft the nine areas requested; anything the plan leaves open is flagged in <a href="#questions">Open questions</a>.</p>
+    <p class="hero-note">Architecture draft generated from <code>README.md</code> (the complete plan), prepared for a Zig implementation (target 0.17.x) · anything the plan leaves open is flagged in <a href="#questions">Open questions</a>.</p>
   </div>
 
   <!-- ================= ON THIS PAGE ================= -->
@@ -803,13 +809,13 @@ footer p { margin: 0; }
         <text class="sub" x="235" y="372" text-anchor="middle">private git · OpenTimestamps</text>
 
         <!-- edges -->
-        <path class="edge draw" pathLength="1" d="M170 64 L296 64" marker-end="url(#arch-arr)"></path>
-        <path class="edge draw" pathLength="1" d="M330 94 L256 176" marker-end="url(#arch-arr)"></path>
-        <path class="edge draw" pathLength="1" d="M512 94 L566 146" marker-end="url(#arch-arr)"></path>
-        <path class="edge draw" pathLength="1" d="M352 212 L416 212" marker-end="url(#arch-arr)"></path>
-        <path class="edge draw" pathLength="1" d="M235 246 L235 326" marker-end="url(#arch-arr)"></path>
-        <path class="edge-dash" d="M300 84 L84 84 L84 358 L116 358" marker-end="url(#arch-arr)"></path>
-        <text class="elbl" x="70" y="220" text-anchor="middle" transform="rotate(-90 70 220)">signed checkpoints</text>
+        <path class="edge draw" pathLength="1" d="M170 64 L298 64" marker-end="url(#arch-arr)"></path>
+        <path class="edge draw" pathLength="1" d="M330 92 L256 180" marker-end="url(#arch-arr)"></path>
+        <path class="edge draw" pathLength="1" d="M512 92 L566 150" marker-end="url(#arch-arr)"></path>
+        <path class="edge draw" pathLength="1" d="M350 212 L418 212" marker-end="url(#arch-arr)"></path>
+        <path class="edge draw" pathLength="1" d="M235 244 L235 328" marker-end="url(#arch-arr)"></path>
+        <path class="edge edge-dash" d="M320 36 L320 18 L20 18 L20 360 L118 360" marker-end="url(#arch-arr)"></path>
+        <text class="elbl" x="12" y="200" text-anchor="middle" transform="rotate(-90 12 200)">signed checkpoints</text>
 
         <text class="note" x="36" y="424">Only the canonical log and anchors are authoritative — deleting every derived artifact loses nothing.</text>
       </svg>
@@ -841,22 +847,28 @@ footer p { margin: 0; }
   <!-- ================= 02 PROJECT STRUCTURE ================= -->
   <section class="doc" id="structure" data-reveal>
     <div class="sec-head"><span class="sec-num">02</span><h2>Project Structure</h2></div>
-    <p class="lede">The repo today is spec-first — only <code>README.md</code> (the plan) exists. The plan is deliberately language-agnostic, so the following is a <strong>draft target layout</strong> derived from its layering and phase order, not a spec requirement. Module boundaries are the important part; the directory names are a suggestion.</p>
+    <p class="lede">We’re building Zephyr in <strong>Zig</strong> — target <strong>0.17.x</strong>, pinned in-repo in Phase 0. The repo today is spec-first: only <code>README.md</code> (the plan) exists. The byte contract in <code>spec/</code> stays language-agnostic per the plan (so test vectors remain portable to other implementations), but the reference implementation is Zig. Directory names below are a draft; the module boundaries are the important part.</p>
 
     <pre><code>zephyr/
-├─ spec/        # Phase 0 — the byte-level contract &amp; test vectors (source of truth for correctness)
-├─ cli/         # Command surface: log, today, search, edit, verify, export, ask, checkpoint, mcp…
-├─ core/        # Canonical log: the only code that touches the format
-│  ├─ records/  #   header/payload encoding, canonical bytes, hash chain
-│  ├─ segments/ #   monthly segments, blocks, sealed footers, cross-segment linking
-│  └─ io/       #   atomic append, crash recovery (incomplete trailing record handling)
-├─ derived/     # Rebuildable views — never authoritative
-│  ├─ llm/      #   deterministic LLM-view renderer (fixed rendering rules)
-│  ├─ search/   #   full-text index, rebuildable from the log
-│  ├─ digests/  #   weekly/monthly summaries (AI reads these first)
-│  └─ profile/  #   AI-maintained living profile + extracted entities
-├─ ai/          # MCP server — read-only by default, provenance header on every response
-└─ anchors/     # Signed checkpoints → private git / second device; OpenTimestamps proofs</code></pre>
+├─ build.zig           # zig build: exe + test step (vector suite) + fmt step
+├─ build.zig.zon       # package manifest (name, version, fingerprint, dependencies)
+├─ spec/               # Phase 0 — the byte-level contract &amp; test vectors (source of truth)
+├─ src/
+│  ├─ main.zig         # CLI entry — arg parsing, dispatch to cli/
+│  ├─ cli/             # commands: log, today, search, edit, verify, export, ask,
+│  │                    #   recap, checkpoint, mcp
+│  ├─ core/            # Canonical log: the only code that touches the format
+│  │  ├─ records.zig   #   header/payload encoding, canonical bytes, hash chain
+│  │  ├─ segments.zig  #   monthly segments, blocks, sealed footers, cross-segment links
+│  │  └─ append.zig    #   atomic append, crash recovery (incomplete trailing record)
+│  ├─ derived/         # Rebuildable views — never authoritative
+│  │  ├─ llm_view.zig  #   deterministic LLM-view renderer (fixed rendering rules)
+│  │  ├─ search.zig    #   full-text index, rebuildable from the log
+│  │  ├─ digests.zig   #   weekly/monthly summaries (AI reads these first)
+│  │  └─ profile.zig   #   AI-maintained living profile + extracted entities
+│  ├─ mcp/             # MCP server — read-only by default, provenance on every response
+│  └─ anchors/         # Ed25519 checkpoints → private git / second device; OTS proofs
+└─ test/               # spec vectors as Zig tests (byte-exact, cross-checked)</code></pre>
 
     <h3>Responsibility of each major part</h3>
     <div class="table-wrap">
@@ -867,10 +879,11 @@ footer p { margin: 0; }
         </thead>
         <tbody>
           <tr><td><code>spec/</code></td><td>Record header/payload layout, canonical encoding, exact hash inputs, segment/footer layout, crash-recovery rules, LLM-view rendering rules, test vectors.</td><td>Drift from implemented behavior — vectors are the gate.</td></tr>
+          <tr><td><code>build.zig</code> / <code>build.zig.zon</code></td><td>Build graph: executable, <code>zig build test</code> (vector suite), fmt; package manifest; pins toolchain and dependencies.</td><td>Embed format knowledge — the build script configures compilation, not the log.</td></tr>
           <tr><td><code>cli/</code></td><td>Argument parsing, view rendering, UX (confirmations, output).</td><td>Touch the log format directly; skip <code>verify</code> before AI-facing output.</td></tr>
           <tr><td><code>core/</code></td><td>Everything in the byte contract: encoding, chaining, segmentation, atomic append, recovery.</td><td>Do I/O without a defined failure mode; modify sealed segments (except redaction).</td></tr>
           <tr><td><code>derived/</code></td><td>Search index, LLM view, digests, profile, entities — all with provenance (range + head hash).</td><td>Be treated as authoritative; serve unverified data.</td></tr>
-          <tr><td><code>ai/</code></td><td>MCP tool surface (<code>get_entries</code>, <code>search</code>, <code>get_digest</code>, <code>get_profile</code>, <code>verify_status</code>; <code>add_entry</code> off by default).</td><td>Serve when the chain is invalid; leak <code>private</code>/redacted entries; be writable via an AI-supplied request.</td></tr>
+          <tr><td><code>mcp/</code></td><td>MCP tool surface (<code>get_entries</code>, <code>search</code>, <code>get_digest</code>, <code>get_profile</code>, <code>verify_status</code>; <code>add_entry</code> off by default).</td><td>Serve when the chain is invalid; leak <code>private</code>/redacted entries; be writable via an AI-supplied request.</td></tr>
           <tr><td><code>anchors/</code></td><td>Checkpoint signing/publishing, OpenTimestamps attestations, anchor comparison in <code>verify</code>.</td><td>Store content — hashes only.</td></tr>
         </tbody>
       </table>
@@ -878,6 +891,10 @@ footer p { margin: 0; }
 
     <div class="callout">
       <p><strong>Dependency direction is one-way:</strong> <code>cli</code> → <code>core</code> → <code>spec</code> (via vectors); <code>derived</code> and <code>ai</code> consume the log through core’s verified reads; <code>anchors</code> only publish and compare hashes. Nothing derived may write back into the canonical log — the one sanctioned exception is the explicit, logged redaction mechanism.</p>
+    </div>
+
+    <div class="callout">
+      <p><strong>What Zig gives us:</strong> <code>std.crypto</code> covers the entire trust layer — SHA-256 plus Ed25519 (<code>std.crypto.sign.Ed25519</code>); <code>std.json</code> handles the MCP wire format; comptime makes the canonical byte encoding checkable at compile time; and the result is a single static binary with no runtime dependencies — a good fit for local-first. The two gaps (zstd, OpenTimestamps verification) are tracked in <a href="#questions">open questions</a>.</p>
     </div>
   </section>
 
@@ -971,7 +988,7 @@ footer p { margin: 0; }
 
     <h3>Data model diagram</h3>
     <figure class="card diagram-card">
-      <svg class="diagram" viewBox="0 0 760 500" role="img" aria-labelledby="dm-title dm-desc">
+      <svg class="diagram" viewBox="0 0 760 510" role="img" aria-labelledby="dm-title dm-desc">
         <title id="dm-title">Zephyr data model diagram</title>
         <desc id="dm-desc">A record consists of an immutable chained header and a committed redactable payload, linked into a hash chain. Records are stored in monthly segments containing compressed blocks and a sealed footer. A segment’s head hash is signed into a checkpoint, which is published to anchors: a private git repository, a second device, and OpenTimestamps. The verified log is rendered into the rebuildable derived layer — LLM view, search index, digests, profile and entities, and the MCP server — and every derived artifact records the log range and head hash it came from.</desc>
         <defs>
@@ -981,38 +998,39 @@ footer p { margin: 0; }
         </defs>
 
         <!-- record hash chain loop -->
-        <path class="edge-dash" d="M36 76 L20 76 L20 188 L34 188" marker-end="url(#dm-arr)"></path>
-        <text class="elbl" x="13" y="132" text-anchor="middle" transform="rotate(-90 13 132)">hash chain</text>
+        <path class="edge edge-dash" d="M36 76 L20 76 L20 200 L34 200" marker-end="url(#dm-arr)"></path>
+        <text class="elbl" x="12" y="138" text-anchor="middle" transform="rotate(-90 12 138)">hash chain</text>
 
         <!-- RECORD -->
-        <rect class="box" x="36" y="36" width="236" height="196" rx="12"></rect>
-        <text class="lbl" x="154" y="62" text-anchor="middle">Record</text>
-        <text class="tiny" x="154" y="80" text-anchor="middle">entry · amendment · tombstone</text>
-        <text class="tiny" x="154" y="94" text-anchor="middle">redaction · checkpoint</text>
-        <rect class="box-sub" x="56" y="106" width="196" height="52" rx="8"></rect>
-        <text class="sub" x="154" y="127" text-anchor="middle">Header — chained, immutable</text>
-        <text class="tiny" x="154" y="143" text-anchor="middle">seq · ts · flags · commitment · record_hash</text>
-        <rect class="box-sub" x="56" y="170" width="196" height="52" rx="8"></rect>
-        <text class="sub" x="154" y="191" text-anchor="middle">Payload — committed, redactable</text>
-        <text class="tiny" x="154" y="207" text-anchor="middle">salt · text (NFC) · tags</text>
+        <rect class="box" x="36" y="36" width="236" height="216" rx="12"></rect>
+        <text class="lbl" x="154" y="60" text-anchor="middle">Record</text>
+        <text class="tiny" x="154" y="78" text-anchor="middle">entry · amendment · tombstone</text>
+        <text class="tiny" x="154" y="92" text-anchor="middle">redaction · checkpoint</text>
+        <rect class="box-sub" x="56" y="104" width="196" height="58" rx="8"></rect>
+        <text class="sub" x="154" y="124" text-anchor="middle">Header — chained, immutable</text>
+        <text class="tiny" x="154" y="140" text-anchor="middle">seq · ts · flags · target_seq</text>
+        <text class="tiny" x="154" y="154" text-anchor="middle">commitment · record_hash</text>
+        <rect class="box-sub" x="56" y="172" width="196" height="56" rx="8"></rect>
+        <text class="sub" x="154" y="192" text-anchor="middle">Payload — committed, redactable</text>
+        <text class="tiny" x="154" y="208" text-anchor="middle">salt · text (NFC) · tags</text>
 
         <!-- SEGMENT -->
-        <rect class="box-auth" x="340" y="36" width="196" height="196" rx="12"></rect>
-        <text class="lbl" x="438" y="62" text-anchor="middle">Segment</text>
-        <text class="tiny" x="438" y="80" text-anchor="middle">default: one per month · sealed</text>
-        <rect class="box-sub" x="360" y="94" width="156" height="50" rx="8"></rect>
-        <text class="sub" x="438" y="114" text-anchor="middle">Blocks</text>
-        <text class="tiny" x="438" y="130" text-anchor="middle">compressed payloads (zstd)</text>
-        <text class="tiny" x="438" y="172" text-anchor="middle">footer: seq range · count</text>
-        <text class="tiny" x="438" y="186" text-anchor="middle">· segment head hash · footer hash</text>
-        <text class="tiny" x="438" y="214" text-anchor="middle">next segment chains from previous head</text>
+        <rect class="box-auth" x="340" y="36" width="196" height="216" rx="12"></rect>
+        <text class="lbl" x="438" y="60" text-anchor="middle">Segment</text>
+        <text class="tiny" x="438" y="78" text-anchor="middle">default: one per month · sealed</text>
+        <rect class="box-sub" x="360" y="92" width="156" height="50" rx="8"></rect>
+        <text class="sub" x="438" y="112" text-anchor="middle">Blocks</text>
+        <text class="tiny" x="438" y="128" text-anchor="middle">compressed payloads (zstd)</text>
+        <text class="tiny" x="438" y="168" text-anchor="middle">footer: seq range · count</text>
+        <text class="tiny" x="438" y="182" text-anchor="middle">· segment head hash · footer hash</text>
+        <text class="tiny" x="438" y="206" text-anchor="middle">chains from previous segment head</text>
 
         <!-- CHECKPOINT -->
         <rect class="box" x="600" y="36" width="124" height="96" rx="12"></rect>
-        <text class="lbl" x="662" y="64" text-anchor="middle">Checkpoint</text>
-        <text class="tiny" x="662" y="84" text-anchor="middle">signed head hash</text>
-        <text class="tiny" x="662" y="98" text-anchor="middle">· count · time</text>
-        <text class="tiny" x="662" y="112" text-anchor="middle">Ed25519</text>
+        <text class="lbl" x="662" y="62" text-anchor="middle">Checkpoint</text>
+        <text class="tiny" x="662" y="82" text-anchor="middle">signed head hash</text>
+        <text class="tiny" x="662" y="96" text-anchor="middle">· count · time</text>
+        <text class="tiny" x="662" y="110" text-anchor="middle">Ed25519</text>
 
         <!-- ANCHORS -->
         <rect class="box-auth" x="600" y="180" width="124" height="110" rx="12"></rect>
@@ -1023,27 +1041,27 @@ footer p { margin: 0; }
         <text class="tiny" x="662" y="274" text-anchor="middle">hashes only</text>
 
         <!-- DERIVED -->
-        <rect class="box" x="340" y="290" width="384" height="170" rx="12"></rect>
-        <text class="lbl" x="532" y="316" text-anchor="middle">Derived layer — rebuildable</text>
-        <text class="sub" x="364" y="340">LLM view (deterministic renderer)</text>
-        <text class="sub" x="364" y="362">Search index</text>
-        <text class="sub" x="364" y="384">Digests · profile · entities</text>
-        <text class="sub" x="364" y="406">MCP server (read-only by default)</text>
-        <text class="tiny" x="532" y="438" text-anchor="middle">every artifact records: log range + head hash · invalidated by redaction</text>
+        <rect class="box" x="340" y="300" width="384" height="170" rx="12"></rect>
+        <text class="lbl" x="532" y="326" text-anchor="middle">Derived layer — rebuildable</text>
+        <text class="sub" x="364" y="350">LLM view (deterministic renderer)</text>
+        <text class="sub" x="364" y="372">Search index</text>
+        <text class="sub" x="364" y="394">Digests · profile · entities</text>
+        <text class="sub" x="364" y="416">MCP server (read-only by default)</text>
+        <text class="tiny" x="532" y="446" text-anchor="middle">every artifact records: log range + head hash · invalidated by redaction</text>
 
         <!-- edges -->
-        <path class="edge draw" pathLength="1" d="M272 100 L336 100" marker-end="url(#dm-arr)"></path>
-        <text class="elbl" x="304" y="92" text-anchor="middle">grouped into</text>
-        <path class="edge draw" pathLength="1" d="M538 84 L596 84" marker-end="url(#dm-arr)"></path>
+        <path class="edge draw" pathLength="1" d="M272 100 L338 100" marker-end="url(#dm-arr)"></path>
+        <text class="elbl" x="305" y="92" text-anchor="middle">grouped into</text>
+        <path class="edge draw" pathLength="1" d="M536 84 L598 84" marker-end="url(#dm-arr)"></path>
         <text class="elbl" x="567" y="76" text-anchor="middle">head hash</text>
-        <path class="edge draw" pathLength="1" d="M662 138 L662 176" marker-end="url(#dm-arr)"></path>
-        <text class="elbl" x="676" y="162">published</text>
-        <path class="edge-dash" d="M598 230 L470 230 L470 234" marker-end="url(#dm-arr)"></path>
-        <text class="elbl" x="534" y="222" text-anchor="middle">head hash + OTS proof</text>
-        <path class="edge draw" pathLength="1" d="M160 234 L400 286" marker-end="url(#dm-arr)"></path>
-        <text class="elbl" x="272" y="270" text-anchor="middle">verified → rendered</text>
+        <path class="edge draw" pathLength="1" d="M662 132 L662 178" marker-end="url(#dm-arr)"></path>
+        <text class="elbl" x="676" y="160">published</text>
+        <path class="edge edge-dash" d="M600 232 L536 232" marker-end="url(#dm-arr)"></path>
+        <text class="elbl" x="568" y="224" text-anchor="middle">head hash + OTS proof</text>
+        <path class="edge draw" pathLength="1" d="M160 252 L400 298" marker-end="url(#dm-arr)"></path>
+        <text class="elbl" x="270" y="266" text-anchor="middle">verified → rendered</text>
 
-        <text class="note" x="36" y="488">Chain depends on headers only; payloads verify against their commitment. Only the canonical log and anchors are authoritative.</text>
+        <text class="note" x="36" y="496">Chain depends on headers only; payloads verify against their commitment. Only the canonical log and anchors are authoritative.</text>
       </svg>
       <figcaption>Entities and relationships. Dashed: the hash chain (record ↔ record), and anchor attestations back onto the segment head.</figcaption>
     </figure>
@@ -1253,6 +1271,11 @@ footer p { margin: 0; }
         </thead>
         <tbody>
           <tr>
+            <td><strong>Implementation language: Zig</strong> (target 0.17.x, pinned in Phase 0)</td>
+            <td>Single static binary, memory-safe defaults, first-party SHA-256 + Ed25519, fast native <code>verify</code> over large logs, comptime-checkable canonical encoding.</td>
+            <td>The byte contract stays language-agnostic, so vectors remain portable to other implementations. Gaps: no zstd in std, no OpenTimestamps module — both tracked as open questions. The exact toolchain pin and upgrade policy are decided in Phase 0.</td>
+          </tr>
+          <tr>
             <td><strong>SHA-256</strong> for hashing, with a <code>hash_alg</code>/format-version byte in every header</td>
             <td>Universally available; compatible with OpenTimestamps and most signing tools; stable for decades.</td>
             <td>Faster hashes (e.g. BLAKE3) rejected on ecosystem grounds. The version byte makes a future migration possible without ambiguity.</td>
@@ -1283,7 +1306,7 @@ footer p { margin: 0; }
             <td><strong>Rejected:</strong> publishing or storing entries on a public blockchain (only hashes are ever published) and any hosted service / multi-user sync (non-goals). Also rejected: true tamper-<em>proofing</em> against the machine owner — the goal is tamper-<em>evidence</em> backed by external anchors.</td>
           </tr>
           <tr>
-            <td><strong>Language-agnostic spec + byte-level test vectors</strong> (Phase 0 before any implementation)</td>
+            <td><strong>Language-agnostic byte contract</strong> + test vectors — spec first (Phase 0, before any implementation); reference implementation in Zig</td>
             <td>Correctness is defined by spec plus vectors, not by a reference implementation; any language can implement it; two readers from the spec alone must produce identical bytes.</td>
             <td>Front-loads cost into Phase 0, and any encoding ambiguity is a phase-killer — which is why the gate requires “no field has ambiguous encoding.”</td>
           </tr>
@@ -1325,13 +1348,13 @@ footer p { margin: 0; }
       <li class="phase" data-reveal>
         <span class="phase-dot"></span>
         <div class="phase-head"><span class="phase-name">Phase 0 — Spec and test vectors</span></div>
-        <p class="phase-line"><span class="badge"><span class="dot"></span>Deliver</span>Written byte-level spec (records, encoding, segment/footer layout, crash recovery, LLM-view rules) · test vectors including amendment/tombstone/redaction and deliberately corrupted cases · decisions frozen.</p>
+        <p class="phase-line"><span class="badge"><span class="dot"></span>Deliver</span>Written byte-level spec (records, encoding, segment/footer layout, crash recovery, LLM-view rules) · test vectors including amendment/tombstone/redaction and deliberately corrupted cases · decisions frozen · Zig toolchain pinned (0.17.x) with <code>build.zig</code> scaffolding in place.</p>
         <p class="phase-line dim"><span class="badge ok"><span class="dot"></span>Gate</span>Hand-computed hash matches vectors · two readers working only from the spec produce identical bytes · no field has ambiguous encoding.</p>
       </li>
       <li class="phase" data-reveal>
         <span class="phase-dot"></span>
         <div class="phase-head"><span class="phase-name">Phase 1 — Append and verify</span></div>
-        <p class="phase-line"><span class="badge"><span class="dot"></span>Deliver</span><code>log</code> + <code>verify</code> over a chained log (one segment) · atomic append · crash recovery.</p>
+        <p class="phase-line"><span class="badge"><span class="dot"></span>Deliver</span><code>log</code> + <code>verify</code> over a chained log (one segment) · atomic append · crash recovery · the Phase 0 vector suite runs green as <code>zig build test</code>.</p>
         <p class="phase-line dim"><span class="badge ok"><span class="dot"></span>Gate</span>All Phase 0 vectors pass · byte-flip / delete / reorder / forged-insert / timestamp-alter each fail <code>verify</code> at the exact position · kill-mid-write recovers cleanly.</p>
       </li>
       <li class="phase" data-reveal>
@@ -1491,7 +1514,7 @@ footer p { margin: 0; }
         <span class="badge warn"><span class="dot"></span>Phase 0</span>
         <div>
           <p class="q">Compression codec</p>
-          <p class="d">zstd is recommended. The codec is named in the byte spec, so the decision is permanent for v1. <span class="rec">Recommended: zstd</span> (widely available, strong ratio).</p>
+          <p class="d">zstd is recommended, and the codec is named in the byte spec — permanent for v1. <span class="rec">Recommended: zstd.</span> Zig wrinkle: std has no zstd, so this also picks the delivery mechanism — a vendored Zig dependency vs. a C translation of libzstd. Must settle in Phase 0, not 3.</p>
         </div>
       </li>
       <li class="open-q" data-reveal>
@@ -1513,6 +1536,20 @@ footer p { margin: 0; }
         <div>
           <p class="q">Numeric targets: bytes per entry, tokens per entry</p>
           <p class="d">Both gates in Phases 3–4 reference targets “set in Phase 0.” Baseline for bytes: naive JSONL. Baseline for tokens: raw JSON. The numbers need to be chosen before those gates can be judged.</p>
+        </div>
+      </li>
+      <li class="open-q" data-reveal>
+        <span class="badge warn"><span class="dot"></span>Phase 0</span>
+        <div>
+          <p class="q">Zig toolchain version &amp; pin</p>
+          <p class="d">This draft assumes 0.17.x (latest stable covered by the repo’s Zig skills). The project should pin an exact version — vendored toolchain or CI check — and define how upgrades get gated against the vector suite.</p>
+        </div>
+      </li>
+      <li class="open-q" data-reveal>
+        <span class="badge warn"><span class="dot"></span>Phase 5</span>
+        <div>
+          <p class="q">OpenTimestamps verification in Zig</p>
+          <p class="d">The gate requires a timestamp proof to “verify independently of Zephyr.” std has no OTS support — the verifier (Merkle tree + header proofs) must be implemented in Zig and cross-checked against OTS’s own test vectors before it’s trusted.</p>
         </div>
       </li>
       <li class="open-q" data-reveal>
@@ -1549,7 +1586,7 @@ footer p { margin: 0; }
 </main>
 
 <footer>
-  <p class="footer-note">Zephyr — architecture draft, generated from <code>README.md</code> (the complete plan). Sections 2 and the items marked <em>inferred</em> are drafting proposals, not plan text. Design: Apple design language (system typography, token palette, light + dark).</p>
+  <p class="footer-note">Zephyr — architecture draft, generated from <code>README.md</code> (the complete plan) for a Zig implementation (0.17.x). The module layout in section 2 and the items marked <em>inferred</em> are drafting proposals, not plan text. Design: Apple design language (system typography, token palette, light + dark).</p>
   <p class="footer-links"><a href="../README.md">README.md</a> · <a href="#top">Back to top</a></p>
 </footer>
 
