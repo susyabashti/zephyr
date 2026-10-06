@@ -1,0 +1,284 @@
+---
+name: zig-gotchas
+description: >
+  Zig language gotchas — version-independent pitfalls of current Zig, each verified
+  by compiling a failing probe. Covers: test discovery is
+  root-file only (silent "All 0 tests passed"), multi-line string `\\` continuation
+  rules, if/else statements require block branches, for loops yield values not
+  pointers, `@as` is not an integer cast, `@intCast` needs a known result type, slices
+  of stack-local arrays dangle (segfault far from the cause), error-set algebra
+  (superset rule, exhaustive switches break far away, named `<FnName>Error` sets),
+  padded signed fmt prints `+`, `zig build test` is silent on success, `std.json` `?T`
+  fields must be present, `comptime assert` is not a statement. Use when writing or
+  debugging Zig code, when tests mysteriously do not run, when a segfault has no
+  obvious cause, on "error set" compile errors, or when multi-line string, fmt, or
+  JSON parsing misbehaves. Companion to zig-api (version-specific APIs) and
+  zig-tiger-style (style) — this skill covers neither.
+metadata:
+  language: "zig"
+  category: "programming-language"
+---
+
+# Zig Language Gotchas (Version-Independent)
+
+Pitfalls of current Zig that are not version-specific API renames (that is the
+`zig-api` skill) and not style rules (that is the `zig-tiger-style` skill). Every
+item below was confirmed by compiling a probe against the project toolchain; the
+quoted error texts are real, so recognize them in the wild.
+
+Design priority, as always: **Safety > Performance > Developer Experience**. A
+gotcha that segfaults in an unrelated function is a safety issue, not a syntax
+curiosity.
+
+## 1. Test discovery is root-file only
+
+`zig test file.zig` and `b.addTest` run **only the test blocks declared in the
+root file**. Test blocks in transitively `@import`ed files are compiled but
+never discovered.
+
+- Symptom: a test target that reports `All 0 tests passed` while the module
+  obviously contains tests. A re-export module (a file that is only `pub const x =
+  @import("x.zig");` lines) is the classic trap: rooting the test at it runs nothing.
+- This silently green-lights builds: zero tests, zero failures, `exit 0`.
+
+```zig
+// build.zig — one artifact per file that declares tests.
+const test_files = [_][]const u8{
+    "src/core/records.zig",
+    "src/core/view.zig",
+};
+for (test_files) |path| {
+    const module = b.createModule(.{ .root_source_file = b.path(path), .target = target });
+    const tests = b.addTest(.{ .root_module = module });
+    test_step.dependOn(&b.addRunArtifact(tests).step);
+}
+```
+
+- Check the reported test count after adding tests. A count that does not go up
+  means the new tests are not being discovered.
+
+## 2. Multi-line strings
+
+The literal starts with `\\` at the beginning of a line (after leading
+whitespace). Each following line that **begins** (after leading whitespace) with
+`\\` is part of the string: the leading whitespace and the `\\` are stripped and
+the remainder is kept verbatim — including any spaces right after the `\\`. A line
+that does not begin with `\\` **terminates** the literal.
+
+```zig
+// preferred
+const json =
+    \\{"a": 1,
+    \\ "b": [
+    \\   2
+    \\ ]
+    \\}
+;
+// json is: {"a": 1,\n "b": [\n  2\n ]\n}\n
+```
+
+- A `\\` in the middle of a line (for example after a comma in an argument list)
+  does not start a string: `error: expected ',' after argument`.
+- A single `\` at the start of the line is a parse error:
+  `error: expected expression, found 'invalid token'`.
+- For large literals (test fixtures), read a file at test time instead of
+  embedding it.
+
+## 3. `if`/`else` statements require block branches
+
+In statement position, non-block branches do not parse:
+
+```zig
+// avoid — does not compile
+if (c.xor != null) data[c.offset] ^= c.xor.?;
+else data[c.offset] = c.value.?;
+// error: expected statement, found 'else'
+```
+
+```zig
+// preferred
+if (c.xor != null) {
+    data[c.offset] ^= c.xor.?;
+} else {
+    data[c.offset] = c.value.?;
+}
+```
+
+This matches the `zig-tiger-style` formatting rule (always braces unless the
+whole statement fits on one line); the surprise is that the compiler rejects the
+brace-less multi-line form outright.
+
+## 4. `for` loops yield values, not pointers
+
+`for (slice) |item|` binds `item` **by value**. To mutate an element, capture by
+pointer with `*`.
+
+```zig
+fn increment_all(dst: []u8) void {
+    // A pointer capture lets the loop body mutate the element.
+    for (dst, 0..) |*byte, i| {
+        byte.* = @as(u8, @intCast(i + 1));
+    }
+    // A value capture is read-only: `byte = 7;` would be
+    // error: cannot assign to constant
+}
+```
+
+- A pointer capture requires a pointer-like operand: a slice, or an array passed
+  by address. A bare array value is `error: pointer capture of non pointer type`
+  — the compiler suggests the fix:
+
+```zig
+var scratch: [2]u8 = .{ 0, 0 };
+for (&scratch, 0..) |*byte, i| {
+    byte.* = @as(u8, @intCast(i + 1));
+}
+```
+
+- Multi-operand form: `for (left, right, 0..) |l, r, i|`. All operands must have
+  the same length, or one must be an infinite range.
+- For indexed iteration over multiple collections, the codebase idiom is a
+  `while (i < n) : (i += 1)` loop: the index and the bound stay visible, which the
+  `zig-tiger-style` bounded-loop rule wants either way.
+
+## 5. Integer casts
+
+- **`@as` is not a cast between different integer types.**
+  `@as(i64, u64_value)` fails with `error: expected type 'i64', found 'u64'`.
+  Use the builtin that states the intent:
+
+| Intent | Builtin | Check |
+|---|---|---|
+| Value-preserving narrowing/widening | `@intCast(x)` | runtime range check |
+| Reinterpret the same-size bits | `@bitCast(x)` | none (same size only) |
+| Give an untyped literal or `@intCast` its type | `@as(T, x)` | none (x must be T or untyped) |
+
+- **`@intCast` needs a known result type.** Bare `@intCast(x)` in an expression
+  position fails with `error: @intCast must have a known result type`. Bind to a
+  typed declaration, or name the target with `@as`:
+
+```zig
+// preferred — the type is visible at the conversion site
+const minutes: i16 = @intCast(raw);
+
+// also fine — the compiler's own suggested form
+const minute_hi: u8 = @as(u8, @intCast(raw));
+```
+
+## 6. Slices of stack-local arrays dangle
+
+Returning a slice of a local fixed array hands out a pointer into the current
+frame. It compiles, passes unit tests, and segfaults later:
+
+```zig
+// avoid — `tags[0..count]` points into this stack frame
+pub fn decodePayload(bytes: []const u8) !Payload {
+    var tags: [MaxTagCount][]const u8 = undefined;
+    // ... fill tags ...
+    return Payload{ .salt = salt, .text = text, .tags = tags[0..count] };
+}
+```
+
+- The failure is not at the return. The first caller works (the frame is
+  untouched), and a later loop iteration overwrites the frame, so the crash lands
+  in unrelated code — usually a `memcpy` over a wild pointer.
+- Fix: allocate the slice-header array from the caller's allocator, and state the
+  ownership on the struct field so the next reader cannot miss it:
+
+```zig
+// preferred — tag bytes borrow from the input; the header array is allocated
+pub const Payload = struct {
+    /// Borrows from the input bytes.
+    text: []const u8,
+    /// Tag bytes borrow from the input; the slice-header array is allocated by
+    /// decodePayload and freed by the caller (`allocator.free(payload.tags)`).
+    tags: []const []const u8,
+};
+```
+
+- Every caller must free (including validate-only callers that discard the
+  result), and tests using the safe test allocator will fail the whole run on a
+  leaked header array.
+
+## 7. Error-set algebra
+
+- A function's declared error set must be a **superset** of every callee's. The
+  compiler names each missing member; fix the declaration, not the caller.
+- A `switch` over an error set used as an expression is **exhaustive**. Widening
+  one callee's error set (for example adding `Allocator.Error` to a decode
+  function) breaks every distant reporter with
+  `error: the following cases are not exhaustive`. When you add a member to a
+  shared error set, search for every `switch` over it in the same change.
+- Standard library functions expose a named error set — `Dir.ReadFileAllocError`,
+  `segment.ParseError`, `view.RenderError` — so compose explicit unions instead of
+  reaching for `anyerror`:
+
+```zig
+// preferred — every possible failure is named
+pub const VerifyError = Allocator.Error || Dir.ReadFileAllocError ||
+    segment.ParseError || records.DecodePayloadError;
+```
+
+- The `std.testing.expect*` helpers return `error{ TestExpectedEqual }`. A
+  function with an explicit error set that `try`s them must name that member.
+- In tests, free **auxiliary** allocations too (slice-header arrays, index
+  scratch). The test allocator fails the entire run when the process exits with
+  anything still allocated, no matter how small the leak.
+
+## 8. Fixed-width formatting
+
+A positive **signed** integer with a width specifier gets a `+` sign:
+
+```zig
+var buf: [16]u8 = undefined;
+const signed = (std.fmt.bufPrint(&buf, "{d:0>3}", .{@as(i64, 5)}) catch unreachable);
+// signed is "0+5"
+const unsigned = (std.fmt.bufPrint(&buf, "{d:0>3}", .{@as(u32, 5)}) catch unreachable);
+// unsigned is "005"
+```
+
+- Any fixed-width byte layout or rendered view built with `{d:0>N}` over signed
+  types is broken. Format through an unsigned cast (or `@intCast` to one) when
+  the value is asserted non-negative.
+
+## 9. `comptime` is a block, not a statement modifier
+
+```zig
+// avoid — parse error
+comptime assert(HeaderLen == 93);
+
+// preferred
+comptime {
+    assert(HeaderLen == 93);
+}
+```
+
+- Use this form for the constant-relationship assertions that `zig-tiger-style`
+  requires (size invariants, ordering constraints between config values).
+
+## 10. `std.json` (current behavior)
+
+- An optional (`?T`) struct field **must be present** in the JSON.
+  `"field": null` parses to null; an omitted field is `error.MissingField`.
+  Freeze fixtures accordingly — always emit both `null` and real values.
+- `std.json.parseFromSliceLeaky(T, allocator, bytes, .{})` takes the **type
+  first**. It is strict about the input (trailing garbage is `error.SyntaxError`)
+  and "leaky" in one sense only: allocations are not freed on the error path.
+  That is fine with an arena or the test allocator; do not use it with a long-
+  lived GPA in a tight error path.
+
+## 11. Tooling behavior
+
+- **`zig build test` is silent on success.** Per-test output appears only on
+  failure. Use `zig build test --summary all` for the step tree, or run the test
+  binary directly (`.zig-cache/o/<hash>/test`) to see every test name.
+- `std.debug.print("... {s}", .{expr})` does **not** unpack an error union.
+  Resolve the value first:
+
+```zig
+const line = (std.fmt.bufPrint(&buf, "{s}", .{time}) catch unreachable);
+std.debug.print("line: {s}\n", .{line});
+```
+
+- `zig fmt` rewrites files; `zig fmt --check` exits non-zero without writing
+  (the CI gate); a build step made with `b.addFmt` rewrites.
