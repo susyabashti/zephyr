@@ -1,0 +1,378 @@
+{
+  "format_version": 1,
+  "journals": [
+    {
+      "id": "journal0",
+      "description": "A single sealed entry in a single segment.",
+      "segments": [
+        {
+          "name": "2026-01.zph",
+          "sealed": true,
+          "records": [
+            {
+              "type": "entry",
+              "timestamp_ms": 1767225600000,
+              "tz_offset_min": 0,
+              "private": false,
+              "target_seq": 0,
+              "salt_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+              "text": "hello",
+              "tags": []
+            }
+          ]
+        }
+      ],
+      "corruptions": [
+        {
+          "description": "flip one byte of the entry text payload",
+          "segment": "2026-01.zph",
+          "offset": 193,
+          "xor": 1,
+          "value": null,
+          "expect": {
+            "ok": false,
+            "file": "2026-01.zph",
+            "seq": 0,
+            "field": "commitment",
+            "detail": "payload does not match commitment"
+          }
+        },
+        {
+          "description": "flip one byte of the footer head",
+          "segment": "2026-01.zph",
+          "offset": 223,
+          "xor": 1,
+          "value": null,
+          "expect": {
+            "ok": false,
+            "file": "2026-01.zph",
+            "seq": 0,
+            "field": "footer",
+            "detail": "footer head does not match the final record_hash"
+          }
+        }
+      ],
+      "expect": {
+        "view": "# zephyr: seq 0..0 head=ea96b1bf2717b43e67217fd01fa433fad6cbd60548c37ac703ea2332c5adf341\n# 2026-01-01 Thu\n00:00 hello\n",
+        "segments": [
+          {
+            "name": "2026-01.zph",
+            "hex": "5a5048310101000000000000000000000000000000010000007d0000002cea96b1bf2717b43e67217fd01fa433fad6cbd60548c37ac703ea2332c5adf341010100000000000000000000019b76daa800000000000000000000000084bf0bfdd7317696f3c7e4f210cb293f180ec78c5eaa9ef4bde3f8d0f15dda94ea96b1bf2717b43e67217fd01fa433fad6cbd60548c37ac703ea2332c5adf34100000028000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f000568656c6c6f00000000000000000000000000000000000000000000000001ea96b1bf2717b43e67217fd01fa433fad6cbd60548c37ac703ea2332c5adf34116c9623a34c8e58cd642821431f5e55864b3c409d42a2166b22e6c10fd7e9a87"
+          }
+        ],
+        "footer_hashes": [
+          {
+            "name": "2026-01.zph",
+            "hash": "16c9623a34c8e58cd642821431f5e55864b3c409d42a2166b22e6c10fd7e9a87"
+          }
+        ]
+      }
+    },
+    {
+      "id": "journal1",
+      "description": "Ten records across two segments: entries, amendments (one on an entry that is later redacted), a private entry, a redaction, a tombstone, and a checkpoint; the January segment is sealed, the February segment is active. All timestamps are tz +120.",
+      "segments": [
+        {
+          "name": "2026-01.zph",
+          "sealed": true,
+          "records": [
+            {
+              "type": "entry",
+              "timestamp_ms": 1768520700000,
+              "tz_offset_min": 120,
+              "private": false,
+              "target_seq": 0,
+              "salt_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+              "text": "first day in the city",
+              "tags": [
+                "travel",
+                "city"
+              ]
+            },
+            {
+              "type": "entry",
+              "timestamp_ms": 1768555800000,
+              "tz_offset_min": 120,
+              "private": false,
+              "target_seq": 0,
+              "salt_hex": "0708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20212223242526",
+              "text": "second entry",
+              "tags": [
+                "work"
+              ]
+            },
+            {
+              "type": "amendment",
+              "timestamp_ms": 1768557600000,
+              "tz_offset_min": 120,
+              "private": false,
+              "target_seq": 1,
+              "salt_hex": "0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d",
+              "text": "second entry (amended)",
+              "tags": [
+                "work",
+                "updated"
+              ]
+            },
+            {
+              "type": "entry",
+              "timestamp_ms": 1768564800000,
+              "tz_offset_min": 120,
+              "private": true,
+              "target_seq": 0,
+              "salt_hex": "15161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f3031323334",
+              "text": "secret note",
+              "tags": []
+            },
+            {
+              "type": "entry",
+              "timestamp_ms": 1768690800000,
+              "tz_offset_min": 120,
+              "private": false,
+              "target_seq": 0,
+              "salt_hex": "1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b",
+              "text": "entry to redact",
+              "tags": [
+                "old"
+              ]
+            },
+            {
+              "type": "amendment",
+              "timestamp_ms": 1768719600000,
+              "tz_offset_min": 120,
+              "private": false,
+              "target_seq": 4,
+              "salt_hex": "232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142",
+              "text": "entry to redact (amended)",
+              "tags": [
+                "old",
+                "revised"
+              ]
+            },
+            {
+              "type": "entry",
+              "timestamp_ms": 1768723200000,
+              "tz_offset_min": 120,
+              "private": false,
+              "target_seq": 0,
+              "salt_hex": "2a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40414243444546474849",
+              "text": "entry to tombstone",
+              "tags": []
+            },
+            {
+              "type": "redaction",
+              "timestamp_ms": 1768726800000,
+              "tz_offset_min": 120,
+              "private": false,
+              "target_seq": 4,
+              "salt_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+              "text": "",
+              "tags": []
+            },
+            {
+              "type": "tombstone",
+              "timestamp_ms": 1768730400000,
+              "tz_offset_min": 120,
+              "private": false,
+              "target_seq": 6,
+              "salt_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+              "text": "",
+              "tags": []
+            }
+          ]
+        },
+        {
+          "name": "2026-02.zph",
+          "sealed": false,
+          "records": [
+            {
+              "type": "checkpoint",
+              "timestamp_ms": 1769905800000,
+              "tz_offset_min": 120,
+              "private": false,
+              "target_seq": 0,
+              "salt_hex": "3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e",
+              "text": "",
+              "tags": []
+            }
+          ]
+        }
+      ],
+      "corruptions": [
+        {
+          "description": "flip one byte of record 0's commitment (inside the header prefix)",
+          "segment": "2026-01.zph",
+          "offset": 91,
+          "xor": 1,
+          "value": null,
+          "expect": {
+            "ok": false,
+            "file": "2026-01.zph",
+            "seq": 0,
+            "field": "record_hash",
+            "detail": "chain mismatch"
+          }
+        },
+        {
+          "description": "flip one byte of record 0's stored record_hash copy",
+          "segment": "2026-01.zph",
+          "offset": 30,
+          "xor": 1,
+          "value": null,
+          "expect": {
+            "ok": false,
+            "file": "2026-01.zph",
+            "seq": 0,
+            "field": "record_hash",
+            "detail": "stored record_hash copy differs from header"
+          }
+        },
+        {
+          "description": "flip one byte of record 1's text payload",
+          "segment": "2026-01.zph",
+          "offset": 1265,
+          "xor": 1,
+          "value": null,
+          "expect": {
+            "ok": false,
+            "file": "2026-01.zph",
+            "seq": 1,
+            "field": "commitment",
+            "detail": "payload does not match commitment"
+          }
+        },
+        {
+          "description": "flip one byte of record 2's target_seq (amendment)",
+          "segment": "2026-01.zph",
+          "offset": 333,
+          "xor": 1,
+          "value": null,
+          "expect": {
+            "ok": false,
+            "file": "2026-01.zph",
+            "seq": 2,
+            "field": "record_hash",
+            "detail": "chain mismatch"
+          }
+        },
+        {
+          "description": "flip one byte of the amendment-on-redacted-entry placeholder payload",
+          "segment": "2026-01.zph",
+          "offset": 1450,
+          "xor": 1,
+          "value": null,
+          "expect": {
+            "ok": false,
+            "file": "2026-01.zph",
+            "seq": 5,
+            "field": "payload",
+            "detail": "redacted record does not carry the placeholder payload"
+          }
+        },
+        {
+          "description": "flip one byte of the redaction record's placeholder payload",
+          "segment": "2026-01.zph",
+          "offset": 1546,
+          "xor": 1,
+          "value": null,
+          "expect": {
+            "ok": false,
+            "file": "2026-01.zph",
+            "seq": 7,
+            "field": "commitment",
+            "detail": "payload does not match commitment"
+          }
+        },
+        {
+          "description": "flip one byte of the footer count",
+          "segment": "2026-01.zph",
+          "offset": 1636,
+          "xor": 1,
+          "value": null,
+          "expect": {
+            "ok": false,
+            "file": "2026-01.zph",
+            "seq": 0,
+            "field": "footer",
+            "detail": "footer fields do not match the segment"
+          }
+        },
+        {
+          "description": "flip one byte of the footer hash",
+          "segment": "2026-01.zph",
+          "offset": 1676,
+          "xor": 1,
+          "value": null,
+          "expect": {
+            "ok": false,
+            "file": "2026-01.zph",
+            "seq": 0,
+            "field": "footer",
+            "detail": "footer hash mismatch"
+          }
+        },
+        {
+          "description": "flip one byte of the February segment magic",
+          "segment": "2026-02.zph",
+          "offset": 0,
+          "xor": 1,
+          "value": null,
+          "expect": {
+            "ok": false,
+            "file": "2026-02.zph",
+            "seq": 0,
+            "field": "magic",
+            "detail": "bad magic"
+          }
+        },
+        {
+          "description": "set record 9's tz offset out of range (0x0578 = 1400 minutes)",
+          "segment": "2026-02.zph",
+          "offset": 80,
+          "xor": null,
+          "value": 5,
+          "expect": {
+            "ok": false,
+            "file": "2026-02.zph",
+            "seq": 9,
+            "field": "tz_offset_min",
+            "detail": "tz offset out of range"
+          }
+        },
+        {
+          "description": "flip one byte of the February segment payload_region_len",
+          "segment": "2026-02.zph",
+          "offset": 26,
+          "xor": 1,
+          "value": null,
+          "expect": {
+            "ok": false,
+            "file": "2026-02.zph",
+            "seq": 0,
+            "field": "file",
+            "detail": "file size inconsistent with header"
+          }
+        }
+      ],
+      "expect": {
+        "view": "# zephyr: seq 0..9 head=402b25abeccb2f2bf6415093deab4adeab787bad2eafc0c67fe15061b1316b31\n# 2026-01-16 Fri\n01:45 [travel][city] first day in the city\n11:30 (edited) [work][updated] second entry (amended)\n# 2026-01-18 Sun\n01:00 [redacted]\n",
+        "segments": [
+          {
+            "name": "2026-01.zph",
+            "hex": "5a50483101010000000000000000000000000000000900000465000001d16e47e71e0e47969da17cfbeb69850020e299ecfb0a9b0d493d54610512b3f449010100000000000000000000019bc40c50600078000000000000000000a153cd72d0ace4dd03a6fcd58b97ca640b5ed24ad5e15d7822bd35ffad91e93d6e47e71e0e47969da17cfbeb69850020e299ecfb0a9b0d493d54610512b3f449ee258acdfccd9274b3c89e2c1368507f389ec1e0f0fd30143b8f448925db1361010100000000000000010000019bc623e5c000780000000000000000004bfba8c26879b23bdc9f528de88b7d2cc28ca5edd27fcbaf45a290851547acb1ee258acdfccd9274b3c89e2c1368507f389ec1e0f0fd30143b8f448925db1361dd2aefb7ae2507922eb79169e1706af85b0ecdcf20cf064b1bf010cdf0f4b748010200000000000000020000019bc63f5d000078000000000000000001ca9863cf93a6d9cc37a4460a6987bf4ef0798fdb36c5c1c2d2d1be2cf49024cddd2aefb7ae2507922eb79169e1706af85b0ecdcf20cf064b1bf010cdf0f4b74813926ecd8471c2ba713a823130454b2b1d92a0a68e85951e5d4ab8076fa55a1f010100000000000000030000019bc6ad3a00007801000000000000000091c9729290a32b9683afa24531457cb4984b95b3829419c003cc516f8aabd74f13926ecd8471c2ba713a823130454b2b1d92a0a68e85951e5d4ab8076fa55a1f2206ccad2e60e2b02a8b31d75bbdf679e57aefd163a6fc818d0ee14e2584c718010100000000000000040000019bce2fd5800078000000000000000000cfb56dbbbc5e9e0803e93cd32cae0fa68be4f86c2f426725016137fca77d61842206ccad2e60e2b02a8b31d75bbdf679e57aefd163a6fc818d0ee14e2584c718088a2f64627c52c5cc0f453e9f2331e232b66d640d49b29849ba13f703b97fb0010200000000000000050000019bcfe749800078000000000000000004e8f3c3160353e59378012237574390ce41ac05e49413f4296cbef9f474209ef3088a2f64627c52c5cc0f453e9f2331e232b66d640d49b29849ba13f703b97fb07323d841176979cf61c037cb0e0556ecab3b42a5766684ffda0041a964cb99e2010100000000000000060000019bd01e38000078000000000000000000c4b986427ef932454a2c2b27c4b2a7451adb8b9433b1c7ffece5c5006a9d37fd7323d841176979cf61c037cb0e0556ecab3b42a5766684ffda0041a964cb99e2955abe6924f1b4f80f73e0164ad4a964035a4508ddb686198441fd9442afc296010400000000000000070000019bd055268000780000000000000000040d5535e13cc9708d0ff0289af2fae27e564b6bcbcd9242f5140d96957744a517955abe6924f1b4f80f73e0164ad4a964035a4508ddb686198441fd9442afc29649d42ad4d48dd3c130509d465157a5872b704b859cca049e167f859c5e6259d7010300000000000000080000019bd08c150000780000000000000000060d5535e13cc9708d0ff0289af2fae27e564b6bcbcd9242f5140d96957744a51749d42ad4d48dd3c130509d465157a5872b704b859cca049e167f859c5e6259d700000044000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f001566697273742064617920696e207468652063697479020674726176656c0463697479000000340708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20212223242526000c7365636f6e6420656e7472790104776f726b000000460e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d00167365636f6e6420656e7472792028616d656e646564290204776f726b07757064617465640000002e15161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f3031323334000b736563726574206e6f746500000000230000000000000000000000000000000000000000000000000000000000000000000000000000230000000000000000000000000000000000000000000000000000000000000000000000000000352a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748490012656e74727920746f20746f6d6273746f6e650000000023000000000000000000000000000000000000000000000000000000000000000000000000000023000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008000000000000000949d42ad4d48dd3c130509d465157a5872b704b859cca049e167f859c5e6259d791ded42fd08d346bba049430d58703089409579fe5a895030a8d6afa13dd1db9"
+          },
+          {
+            "name": "2026-02.zph",
+            "hex": "5a5048310100000000000000000900000000000000010000007d00000027402b25abeccb2f2bf6415093deab4adeab787bad2eafc0c67fe15061b1316b31010500000000000000090000019c169b43400078000000000000000000969ca7775d22b7b7144602e0a64018e487a86e038367637f334ee10075970aed402b25abeccb2f2bf6415093deab4adeab787bad2eafc0c67fe15061b1316b31000000233f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e000000"
+          }
+        ],
+        "footer_hashes": [
+          {
+            "name": "2026-01.zph",
+            "hash": "91ded42fd08d346bba049430d58703089409579fe5a895030a8d6afa13dd1db9"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -2,6 +2,9 @@
 zig-out/
 zig-pkg/
 *.o
+.scratch/
+.tmp-journal/
+__pycache__/
 
 # General
 .DS_Store
