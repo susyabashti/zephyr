@@ -6,6 +6,7 @@
 
 pub const records = @import("core/records.zig");
 pub const segment = @import("core/segment.zig");
+pub const anchor = @import("core/anchor.zig");
 pub const journal = @import("core/journal.zig");
 pub const view = @import("core/view.zig");
 pub const exporter = @import("core/exporter.zig");

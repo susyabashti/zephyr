@@ -263,6 +263,14 @@ Every phase has a deliverable and a pass/fail gate. Do not start the next phase 
 - Signature verification works from the spec and vectors alone.
 - A timestamp proof verifies independently of Zephyr.
 
+**Status (implemented)**
+
+- The anchor artifact format is frozen in `spec/anchor-format.md` (190-byte `ZPA1` artifact: Ed25519 public key, `head ‖ count ‖ timestamp_ms` signed state, trailing SHA-256 over the first 158 bytes). Vectors in `spec/vectors/anchors.json` (RFC 8032 known-answer pairs plus pinned full artifacts) are re-derived by both implementations: `test/anchors.zig` (`std.crypto` Ed25519) and `test/reference.py` (pure-Python Ed25519 per RFC 8032 §6 in `test/ed25519.py`).
+- `zephyr redact <seq> [--yes]` removes the entry's payload (and its amendments') from disk while the 125-byte header blocks stay byte-identical; `zephyr checkpoint [--key PATH]` appends a checkpoint record and writes the signed artifact to `<journal>/anchors/checkpoint-<seq>.zpa` (key: `--key PATH` > `$ZEPHYR_KEY` > `<journal>/zephyr-key`, auto-created 0600); `verify` runs the anchor check when anchors exist and fails the journal otherwise.
+- Gates passed: tail truncation and a same-shape full rewrite are caught by the anchor check (`test/phase5.zig`); redaction leaves the content and salt off disk while `verify` passes and reports the entry redacted; signatures verify from spec and vectors alone.
+- **Anchor 2 (OpenTimestamps on sealed segment heads) is deferred to Phase 5b** — the git/second-device anchor is the trust source for now (the last Phase 5 gate, "a timestamp proof verifies independently of Zephyr", belongs there).
+- Merkle roots / single-entry proofs: not done (optional).
+
 ### Phase 6 — AI access (MCP)
 
 **Deliverables**

@@ -34,6 +34,7 @@ pub fn build(b: *std.Build) void {
 
     const options = b.addOptions();
     options.addOptionPath("vectors", b.path("spec/vectors/journals.json"));
+    options.addOptionPath("anchors", b.path("spec/vectors/anchors.json"));
     const vector_module = b.createModule(.{
         .root_source_file = b.path("test/vectors.zig"),
         .target = target,
@@ -82,6 +83,30 @@ pub fn build(b: *std.Build) void {
     const phase4_tests = b.addTest(.{ .root_module = phase4_module });
     const run_phase4_tests = b.addRunArtifact(phase4_tests);
 
+    // Phase 5: anchor vectors — RFC 8032 known answers plus the pinned 190-byte
+    // artifacts, re-derived from their inputs with std.crypto Ed25519.
+    const anchors_module = b.createModule(.{
+        .root_source_file = b.path("test/anchors.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "zephyr_core", .module = core },
+            .{ .name = "std_options", .module = options.createModule() },
+        },
+    });
+    const anchors_tests = b.addTest(.{ .root_module = anchors_module });
+    const run_anchors_tests = b.addRunArtifact(anchors_tests);
+
+    // Phase 5: redaction and anchor gates on an on-disk journal.
+    const phase5_module = b.createModule(.{
+        .root_source_file = b.path("test/phase5.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "zephyr_core", .module = core },
+        },
+    });
+    const phase5_tests = b.addTest(.{ .root_module = phase5_module });
+    const run_phase5_tests = b.addRunArtifact(phase5_tests);
+
     const roundtrip_module = b.createModule(.{
         .root_source_file = b.path("test/roundtrip.zig"),
         .target = target,
@@ -117,6 +142,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_phase2_tests.step);
     test_step.dependOn(&run_phase3_tests.step);
     test_step.dependOn(&run_phase4_tests.step);
+    test_step.dependOn(&run_anchors_tests.step);
+    test_step.dependOn(&run_phase5_tests.step);
 
     const fmt_step = b.step("fmt", "Run format checks");
     fmt_step.dependOn(&b.addFmt(.{ .paths = b.pathList(&.{ "src", "test", "build.zig" }) }).step);

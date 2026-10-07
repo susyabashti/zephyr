@@ -157,8 +157,10 @@ test "phase 2: views, amendments, tombstones, search" {
     // ---- target resolution errors
     try std.testing.expectError(error.TargetNotFound, core.journal.Journal.resolveEditTarget(recs2.headers, 99));
     try std.testing.expectError(error.TargetNotEntry, core.journal.Journal.resolveEditTarget(recs2.headers, 4));
-    // The first entry is never targetable: target 0 means "no target" (spec 3.1).
-    try std.testing.expectError(error.TargetZero, core.journal.Journal.resolveEditTarget(recs2.headers, 0));
+    // The first entry is targetable: spec 3.1 only requires the target to be
+    // strictly earlier than the record, so seq 0 is a legal target.
+    const target0 = core.journal.Journal.resolveEditTarget(recs2.headers, 0) catch unreachable;
+    try std.testing.expectEqual(@as(u64, 0), target0.seq);
 }
 
 // ---- helpers

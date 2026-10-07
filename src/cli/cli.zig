@@ -1,6 +1,7 @@
 //! CLI: zephyr <text>  |  zephyr log [-t TAG]... <text>  |  zephyr verify
 //!     zephyr today | yesterday | week | on YYYY-MM-DD  |  zephyr search <q>
 //!     zephyr edit <seq> [-t TAG]... <text>  |  zephyr rm <seq>
+//!     zephyr redact <seq> [--yes]  |  zephyr checkpoint [--key PATH]
 //!     zephyr export --for-ai [YYYY-MM-DD[:YYYY-MM-DD]]
 //!
 //! Exit codes: 0 ok, 1 integrity or journal error, 2 usage error.
@@ -10,6 +11,7 @@ const core = @import("zephyr_core");
 
 const Io = std.Io;
 const File = Io.File;
+const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 
 pub const Version: []const u8 = "0.2.0";
@@ -20,9 +22,12 @@ pub const RunError = error{
     JournalNotFound,
     TargetNotFound,
     TargetNotEntry,
-    TargetZero,
-} || core.journal.OpenError || core.journal.Journal.AppendError ||
-    core.journal.Journal.VerifyError || core.view.RenderError || File.Writer.Error;
+    BadKeyFile,
+} || core.anchor.SignError || core.journal.OpenError || core.journal.Journal.AppendError ||
+    core.journal.Journal.VerifyError || core.journal.Journal.RedactError ||
+    core.journal.Journal.CheckAnchorsError || core.journal.Journal.WriteAnchorError ||
+    core.view.RenderError || File.OpenError || File.Writer.Error || std.Io.Reader.ShortError ||
+    std.crypto.errors.IdentityElementError;
 
 pub fn run(init: std.process.Init, args: []const []const u8) RunError!void {
     const io = init.io;
@@ -81,6 +86,10 @@ pub fn run(init: std.process.Init, args: []const []const u8) RunError!void {
             try runEdit(arena, io, err_file, out, init.environ_map, path, rest);
         } else if (std.mem.eql(u8, command, "rm")) {
             try runRm(arena, io, err_file, out, init.environ_map, path, rest);
+        } else if (std.mem.eql(u8, command, "redact")) {
+            try runRedact(arena, io, err_file, out, init.environ_map, path, rest);
+        } else if (std.mem.eql(u8, command, "checkpoint")) {
+            try runCheckpoint(arena, io, err_file, out, init.environ_map, path, rest);
         } else {
             unreachable;
         }
@@ -96,7 +105,8 @@ fn isCommand(s: []const u8) bool {
         std.mem.eql(u8, s, "today") or std.mem.eql(u8, s, "yesterday") or
         std.mem.eql(u8, s, "week") or std.mem.eql(u8, s, "on") or
         std.mem.eql(u8, s, "search") or std.mem.eql(u8, s, "edit") or
-        std.mem.eql(u8, s, "rm") or std.mem.eql(u8, s, "export");
+        std.mem.eql(u8, s, "rm") or std.mem.eql(u8, s, "redact") or
+        std.mem.eql(u8, s, "checkpoint") or std.mem.eql(u8, s, "export");
 }
 
 // ---------------------------------------------------------------- log
@@ -244,7 +254,6 @@ fn runEdit(
         return switch (err) {
             error.TargetNotFound => error.TargetNotFound,
             error.TargetNotEntry => error.TargetNotEntry,
-            error.TargetZero => error.TargetZero,
         };
     };
     // An amendment carries the entry's tags unless the user gives new ones,
@@ -289,7 +298,6 @@ fn runRm(
         return switch (err) {
             error.TargetNotFound => error.TargetNotFound,
             error.TargetNotEntry => error.TargetNotEntry,
-            error.TargetZero => error.TargetZero,
         };
     };
     const now_ms = nowMs(io);
@@ -305,6 +313,144 @@ fn runRm(
         target_header.isPrivate(),
     );
     try printLine(out, io, try arena.print("tombstoned seq {d} (new seq {d})", .{ target, seq }));
+}
+
+// ---------------------------------------------------------------- redact
+
+fn runRedact(
+    arena: Allocator,
+    io: Io,
+    err_file: File,
+    out: File,
+    environ_map: *const std.process.Environ.Map,
+    path: []const u8,
+    rest: []const []const u8,
+) RunError!void {
+    if (rest.len < 1 or rest.len > 2) return error.Usage;
+    const target = std.fmt.parseInt(u64, rest[0], 10) catch return error.Usage;
+    var assume_yes = false;
+    if (rest.len == 2) {
+        if (!std.mem.eql(u8, rest[1], "--yes")) return error.Usage;
+        assume_yes = true;
+    }
+    const journal = try openReadJournal(arena, io, err_file, environ_map, path);
+    defer journal.close();
+    _ = try verifyOrReport(arena, io, err_file, &journal);
+    if (!assume_yes) {
+        const proceed = try confirmRedact(arena, io, out, target);
+        if (!proceed) {
+            try printLine(out, io, "aborted");
+            return;
+        }
+    }
+    const now_ms = nowMs(io);
+    const offset = try journal.tzOffsetMinutesAtMs(now_ms);
+    const seq = try journal.redact(arena, target, now_ms, offset);
+    try printLine(out, io, try arena.print("redacted seq {d} (redaction seq {d})", .{ target, seq }));
+}
+
+/// Prints the warning prompt and reads one line from stdin. Anything other
+/// than y/Y aborts the redaction.
+fn confirmRedact(arena: Allocator, io: Io, out: File, target: u64) RunError!bool {
+    const prompt_fmt =
+        \\redact seq {d}? the entry's text and tags are removed from the file; the
+        \\record header and hash chain are kept, so the redaction itself is visible.
+        \\Proceed? [y/N] 
+    ;
+    const prompt = try arena.print(prompt_fmt, .{target});
+    try File.writeStreamingAll(out, io, prompt);
+    const stdin = File.stdin();
+    var stream_buf: [4096]u8 = undefined;
+    var line_buf: [16]u8 = undefined;
+    var reader = File.reader(stdin, io, &stream_buf);
+    const n = try std.Io.Reader.readSliceShort(&reader.interface, &line_buf);
+    if (n == 0) return false;
+    var end = n;
+    if (line_buf[end - 1] == '\n') end -= 1;
+    if (end > 0 and line_buf[end - 1] == '\r') end -= 1;
+    return std.mem.eql(u8, line_buf[0..end], "y") or std.mem.eql(u8, line_buf[0..end], "Y");
+}
+
+// ---------------------------------------------------------------- checkpoint
+
+fn runCheckpoint(
+    arena: Allocator,
+    io: Io,
+    err_file: File,
+    out: File,
+    environ_map: *const std.process.Environ.Map,
+    path: []const u8,
+    rest: []const []const u8,
+) RunError!void {
+    var key_path: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        if (std.mem.eql(u8, rest[i], "--key")) {
+            i += 1;
+            if (i >= rest.len) return error.Usage;
+            key_path = rest[i];
+        } else {
+            return error.Usage;
+        }
+    }
+    const journal = try openReadJournal(arena, io, err_file, environ_map, path);
+    defer journal.close();
+    _ = try verifyOrReport(arena, io, err_file, &journal);
+
+    // Key resolution: --key PATH > $ZEPHYR_KEY > <journal>/zephyr-key.
+    const resolved_key = key_path orelse environ_map.get("ZEPHYR_KEY") orelse
+        try arena.print("{s}/zephyr-key", .{path});
+    const seed = try loadOrCreateKey(arena, io, resolved_key);
+    const kp = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(seed);
+
+    const now_ms = nowMs(io);
+    const offset = try journal.tzOffsetMinutesAtMs(now_ms);
+    const seq = try journal.appendRecord(arena, .checkpoint, 0, "", &.{}, now_ms, offset, false);
+
+    // Anchor only a verified state: re-verify after the append and bind the
+    // resulting (head, count) to the key.
+    const result = try journal.verify(arena);
+    if (!result.ok) {
+        try reportIssue(err_file, io, arena, result.issue.?);
+        return error.VerifyFailed;
+    }
+    const bytes = try core.anchor.render(&kp, result.head, result.record_count, now_ms, seq);
+    try journal.writeAnchorFile(arena, seq, &bytes);
+    try printLine(out, io, try arena.print(
+        "checkpoint seq {d} (key {s}, anchor anchors/checkpoint-{d}.zpa)",
+        .{ seq, resolved_key, seq },
+    ));
+}
+
+/// Reads the 32-byte signing seed from the key file, or on first use
+/// generates it from the OS CSPRNG and stores it with 0600 permissions.
+fn loadOrCreateKey(allocator: Allocator, io: Io, key_path: []const u8) RunError![32]u8 {
+    var seed: [32]u8 = undefined;
+    const d = if (std.fs.path.dirname(key_path)) |parent|
+        try Dir.openDirAbsolute(io, parent, .{})
+    else
+        Dir.cwd();
+    defer Dir.close(d, io);
+    const file_name = std.fs.path.basename(key_path);
+    const existing = Dir.readFileAlloc(d, io, file_name, allocator, .unlimited) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => |e| return e,
+    };
+    if (existing) |bytes| {
+        defer allocator.free(bytes);
+        if (bytes.len != 32) return error.BadKeyFile;
+        @memcpy(&seed, bytes);
+        return seed;
+    }
+    try Io.randomSecure(io, &seed);
+    const key_file = Dir.createFile(d, io, file_name, .{
+        .permissions = File.Permissions.fromMode(0o600),
+    }) catch |err| switch (err) {
+        else => return err,
+    };
+    defer File.close(key_file, io);
+    try File.writeStreamingAll(key_file, io, &seed);
+    return seed;
 }
 
 /// The tags the view currently shows for entry `seq`: the latest amendment's
@@ -396,10 +542,41 @@ fn runVerify(
             break :blk try arena.print("ok: {d} record(s), head {s}{s}", .{ result.record_count, head_hex, redacted });
         };
         try printLine(out, io, line);
+
+        // The anchor check (anchor-format section 6) runs only on a journal
+        // that passed verify; a failing latest anchor means the journal must
+        // not be trusted.
+        const outcome = try journal.checkAnchors(arena);
+        if (outcome.failure) |failure| {
+            const file = outcome.file_name orelse "anchor";
+            try printLine(err_file, io, try arena.print("FAIL: anchor {s}: {s}", .{ file, anchorFailureReason(failure) }));
+            return error.VerifyFailed;
+        }
+        if (outcome.ok) |check| {
+            const head_hex = try hexOf(arena, &check.artifact.head);
+            try printLine(out, io, try arena.print("anchor: ok (checkpoint seq {d}, head {s})", .{
+                check.artifact.checkpoint_seq,
+                head_hex,
+            }));
+        }
     } else {
         try reportIssue(err_file, io, arena, result.issue.?);
         return error.VerifyFailed;
     }
+}
+
+fn anchorFailureReason(failure: core.journal.Journal.CheckAnchorsFailure) []const u8 {
+    return switch (failure) {
+        error.CountRegression => "journal is shorter than the anchor (records removed after the checkpoint)",
+        error.CheckpointMissing => "anchored checkpoint not found in the journal (truncated or rewritten since the anchor)",
+        error.BadLength => "artifact is not 190 bytes (corrupted)",
+        error.BadMagic => "artifact has a bad magic (corrupted)",
+        error.BadVersion => "artifact has an unknown version",
+        error.ReservedNotZero => "artifact has a non-zero reserved byte",
+        error.BadHash => "artifact hash mismatch (corrupted)",
+        error.NonCanonicalKey => "artifact public key is not a valid Ed25519 point",
+        error.SignatureVerificationFailed => "artifact signature verification failed (artifact or key corrupted)",
+    };
 }
 
 // ---------------------------------------------------------------- helpers
@@ -433,10 +610,6 @@ fn reportTargetError(arena: Allocator, io: Io, file: File, target: u64, err: cor
     const msg = switch (err) {
         error.TargetNotFound => try arena.print("no such entry: seq {d}", .{target}),
         error.TargetNotEntry => try arena.print("seq {d} is not an entry", .{target}),
-        error.TargetZero => try arena.print(
-            "seq 0 cannot be amended or deleted (format v1 reserves target 0)",
-            .{},
-        ),
     };
     try printLine(file, io, msg);
 }
@@ -552,7 +725,12 @@ fn printUsage(file: File, io: Io) File.Writer.Error!void {
         \\                                   amend an entry (tags kept unless
         \\                                   -t is given)
         \\  zephyr rm <seq>                   hide an entry (tombstone)
-        \\  zephyr verify                     full integrity check
+        \\  zephyr redact <seq> [--yes]       remove an entry's content from the
+        \\                                   file (headers and chain are kept)
+        \\  zephyr checkpoint [--key PATH]    sign the journal state into an anchor
+        \\                                   artifact (anchors/checkpoint-<seq>.zpa)
+        \\  zephyr verify                     full integrity check (plus the
+        \\                                   anchor check, when anchors exist)
         \\  zephyr export --for-ai [range]   LLM view of the log (refuses a
         \\                                   failing log); range: YYYY-MM-DD or
         \\                                   YYYY-MM-DD:YYYY-MM-DD

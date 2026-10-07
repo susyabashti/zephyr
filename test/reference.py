@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Independent reference implementation of the Zephyr v1 byte format.
 
-Implements spec/record-format.md using only the Python standard library.
-It is deliberately independent of the Zig implementation in src/: the
-Phase 0 gate is that two implementations working only from the spec
-produce byte-identical files and hashes for the shared vectors in
-spec/vectors/journals.json, and that both agree on verify failures.
+Implements spec/record-format.md and spec/anchor-format.md using only the
+Python standard library (plus test/ed25519.py, a pure-Python Ed25519 per
+the RFC 8032 section 6 illustration). It is deliberately independent of
+the Zig implementation in src/: the gate is that two implementations
+working only from the spec produce byte-identical files, hashes, and
+anchor artifacts for the shared vectors in spec/vectors/.
 
 Usage:
   python3 test/reference.py --gen    fill the expect.* fields in the vectors file
-  python3 test/reference.py --check  validate the vectors file end to end
+  python3 test/reference.py --check  validate the vectors files end to end
 """
 
 import hashlib
@@ -19,6 +20,8 @@ import struct
 import sys
 import unicodedata
 from datetime import date, timedelta
+
+import ed25519
 
 EPOCH = date(1970, 1, 1)
 
@@ -30,6 +33,7 @@ PLACEHOLDER = b"\x00" * 35
 TYPE_NUM = {"entry": 1, "amendment": 2, "tombstone": 3, "redaction": 4, "checkpoint": 5}
 WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 VECTORS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "spec", "vectors", "journals.json")
+ANCHORS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "spec", "vectors", "anchors.json")
 
 
 class VerifyFailure(Exception):
@@ -108,8 +112,6 @@ def validate_record(rec):
     else:
         if text or tags:
             raise ValueError(f"{rtype} record: must have empty text and tags")
-    if rtype in ("amendment", "tombstone", "redaction") and rec["target_seq"] == 0:
-        raise ValueError(f"{rtype} record: requires a target")
 
 
 def header_prefix(seq, rec, commitment):
@@ -462,6 +464,77 @@ def apply_corruption(data, corruption):
     return bytes(data)
 
 
+# ---------------------------------------------------------------- anchors
+
+def anchor_message(head, count, timestamp_ms):
+    """The 48-byte signed message (anchor-format section 4)."""
+    return head + count.to_bytes(8, "big") + timestamp_ms.to_bytes(8, "big")
+
+
+def build_anchor_artifact(seed, head, count, timestamp_ms, checkpoint_seq):
+    """Rebuilds the 190-byte artifact (anchor-format section 3)."""
+    public_key = ed25519.secret_to_public(seed)
+    signature = ed25519.sign(seed, anchor_message(head, count, timestamp_ms))
+    prefix = (b"ZPA1" + b"\x01" + b"\x00"
+              + public_key + head
+              + count.to_bytes(8, "big") + timestamp_ms.to_bytes(8, "big")
+              + checkpoint_seq.to_bytes(8, "big")
+              + signature)
+    assert len(prefix) == 158
+    return prefix + hashlib.sha256(prefix).digest()
+
+
+def check_anchors():
+    """Re-derives every value in spec/vectors/anchors.json independently.
+    Returns (problems, count)."""
+    with open(ANCHORS_PATH, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if data.get("format_version") != 1:
+        return ["anchors: unsupported format_version"], 0
+    problems = []
+    count = 0
+    for ka in data.get("ed25519_known_answer", []):
+        seed = bytes.fromhex(ka["seed_hex"])
+        message = bytes.fromhex(ka["message_hex"])
+        public_key = bytes.fromhex(ka["public_key_hex"])
+        signature = bytes.fromhex(ka["signature_hex"])
+        if ed25519.secret_to_public(seed) != public_key:
+            problems.append(f"anchors {ka['id']}: derived public key differs from the RFC vector")
+        if ed25519.sign(seed, message) != signature:
+            problems.append(f"anchors {ka['id']}: derived signature differs from the RFC vector")
+        if not ed25519.verify(public_key, message, signature):
+            problems.append(f"anchors {ka['id']}: signature does not verify")
+        count += 1
+    for a in data.get("anchors", []):
+        seed = bytes.fromhex(a["seed_hex"])
+        head = bytes.fromhex(a["head_hex"])
+        expect = a["expect"]
+        artifact = build_anchor_artifact(seed, head, a["count"], a["timestamp_ms"], a["checkpoint_seq"])
+        if ed25519.secret_to_public(seed) != bytes.fromhex(expect["public_key_hex"]):
+            problems.append(f"anchors {a['id']}: derived public key differs from the pinned vector")
+        if artifact[94:158] != bytes.fromhex(expect["signature_hex"]):
+            problems.append(f"anchors {a['id']}: derived signature differs from the pinned vector")
+        if artifact.hex() != expect["artifact_hex"].lower():
+            problems.append(f"anchors {a['id']}: derived artifact differs from the pinned vector")
+        # The self-verification path must reject the corruptions below.
+        bad = bytearray(artifact)
+        bad[100] ^= 1  # a signature byte; the hash covers it
+        if hashlib.sha256(bytes(bad[:158])).digest() == bytes(bad[158:]):
+            problems.append(f"anchors {a['id']}: flipped signature byte passed the artifact hash check")
+        bad[100] ^= 1  # restore
+        bad[120] ^= 1  # another signature byte, with the hash recomputed
+        bad[158:] = hashlib.sha256(bytes(bad[:158])).digest()
+        message = anchor_message(head, a["count"], a["timestamp_ms"])
+        if ed25519.verify(bytes.fromhex(expect["public_key_hex"]), message, bytes(bad[94:158])):
+            problems.append(f"anchors {a['id']}: flipped signature byte passed Ed25519 verification")
+        bad = bytearray(artifact)
+        bad[40] ^= 1  # a head byte; the hash covers it
+        if hashlib.sha256(bytes(bad[:158])).digest() == bytes(bad[158:]):
+            problems.append(f"anchors {a['id']}: flipped head byte passed the artifact hash check")
+        count += 1
+    return problems, count
+
+
 def check_journal(journal, strict):
     """Renders the journal, verifies it, and checks all pinned expectations.
     With strict=False, returns the computed values instead of comparing."""
@@ -560,12 +633,15 @@ def main():
         problems = []
         for journal in data["journals"]:
             problems += check_journal(journal, strict=True)
+        anchor_problems, n_anchors = check_anchors()
+        problems += anchor_problems
         if problems:
             for p in problems:
                 print("FAIL:", p, file=sys.stderr)
             sys.exit(1)
         n_corruptions = sum(len(j.get("corruptions", [])) for j in data["journals"])
-        print(f"ok: {len(data['journals'])} journal(s), {n_corruptions} corruption(s) all verified")
+        print(f"ok: {len(data['journals'])} journal(s), {n_corruptions} corruption(s), "
+              f"{n_anchors} anchor vector(s) all verified")
 
 
 if __name__ == "__main__":

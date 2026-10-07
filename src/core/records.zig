@@ -280,12 +280,10 @@ pub fn validate(header: *const Header, payload: *const Payload) ValidateError!vo
         },
         .amendment => {
             if (!has_text) return error.EmptyText;
-            if (header.target_seq == 0) return error.BadTargetSeq;
         },
         .tombstone, .redaction => {
             if (has_text) return error.NonEmptyText;
             if (has_tags) return error.TagsOnEmpty;
-            if (header.target_seq == 0) return error.BadTargetSeq;
         },
         .checkpoint => {
             if (has_text) return error.NonEmptyText;
@@ -462,6 +460,38 @@ test "placeholder decodes and is detected" {
     try std.testing.expectEqual(@as(usize, 0), decoded.text.len);
     try std.testing.expect(isRedactedPlaceholder(&p));
     try std.testing.expect(!isRedactedPlaceholder(p[0 .. p.len - 1]));
+}
+
+test "target 0 is a valid target (the first entry)" {
+    var header = Header{
+        .version = FormatVersion,
+        .record_type = .amendment,
+        .seq = 1,
+        .timestamp_ms = 0,
+        .tz_offset_min = 0,
+        .flags = 0,
+        .target_seq = 0,
+        .commitment = @splat(0),
+        .record_hash = @splat(0),
+    };
+    const text_payload = Payload{ .salt = @splat(0), .text = "x", .tags = &.{} };
+    const empty_payload = Payload{ .salt = @splat(0), .text = "", .tags = &.{} };
+
+    // Spec section 3.1 only requires the target to be strictly earlier than
+    // the record, so targeting the entry at seq 0 is legal for all three
+    // targeting types (the reader, verifyBytes, has always accepted it).
+    try validate(&header, &text_payload);
+    header.record_type = .tombstone;
+    try validate(&header, &empty_payload);
+    header.record_type = .redaction;
+    try validate(&header, &empty_payload);
+
+    // Forward and self targets still fail.
+    header.record_type = .amendment;
+    header.target_seq = 5;
+    try std.testing.expectError(error.BadTargetSeq, validate(&header, &text_payload));
+    header.target_seq = header.seq;
+    try std.testing.expectError(error.BadTargetSeq, validate(&header, &text_payload));
 }
 
 test "commitment and chain hash are deterministic" {

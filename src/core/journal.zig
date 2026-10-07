@@ -11,6 +11,7 @@
 const std = @import("std");
 const records = @import("records.zig");
 const segment = @import("segment.zig");
+const anchor = @import("anchor.zig");
 const timezone = @import("timezone.zig");
 
 const Io = std.Io;
@@ -244,19 +245,66 @@ pub const Journal = struct {
         };
     }
 
+    /// Redacts an entry: replaces the stored payload of the target entry and
+    /// of every amendment on it with the 35-byte placeholder (payload region
+    /// only; the headers and hash chain are untouched, spec sections 4 and
+    /// 6), then appends the redaction record. Returns the redaction record's
+    /// seq. The journal is assumed to have passed verify.
+    pub const RedactError = Allocator.Error || Dir.ReadFileAllocError || Dir.Iterator.Error ||
+        segment.ParseError || segment.RedactPayloadsError || AppendError || error{
+        TargetNotFound,
+        TargetNotEntry,
+        AlreadyRedacted,
+    };
+
+    pub fn redact(
+        self: *const Journal,
+        allocator: Allocator,
+        target_seq: u64,
+        timestamp_ms: u64,
+        tz_offset_min: i16,
+    ) RedactError!u64 {
+        const names = try self.listSegments(allocator);
+        defer allocator.free(names);
+
+        var found = false;
+        for (names) |name| {
+            const bytes = try self.readFileBytes(allocator, name);
+            defer allocator.free(bytes);
+            var fail_index: usize = std.math.maxInt(usize);
+            var seg = try segment.parse(allocator, name, bytes, &fail_index);
+            defer seg.deinit(allocator);
+
+            var indexes = std.ArrayList(usize).empty;
+            errdefer indexes.deinit(allocator);
+            for (seg.records, 0..) |h, i| {
+                if (h.seq == target_seq) {
+                    if (h.record_type != .entry) return error.TargetNotEntry;
+                    if (records.isRedactedPlaceholder(seg.payloads[i])) return error.AlreadyRedacted;
+                    try indexes.append(allocator, i);
+                } else if (h.record_type == .amendment and h.target_seq == target_seq) {
+                    try indexes.append(allocator, i);
+                }
+            }
+            if (indexes.items.len == 0) continue;
+            found = true;
+            const new_bytes = try segment.redactPayloads(allocator, bytes, indexes.items);
+            try segment.writeAtomic(self.dir, self.io, name, new_bytes);
+        }
+        if (!found) return error.TargetNotFound;
+
+        return try self.appendRecord(allocator, .redaction, target_seq, "", &.{}, timestamp_ms, tz_offset_min, false);
+    }
+
     /// Names the entry that an amendment or tombstone may target.
     pub const ResolveTargetError = error{
         TargetNotFound,
         TargetNotEntry,
-        TargetZero,
     };
 
     pub fn resolveEditTarget(headers: []const records.Header, seq: u64) ResolveTargetError!*const records.Header {
         if (seq >= headers.len) return error.TargetNotFound;
         if (headers[seq].record_type != .entry) return error.TargetNotEntry;
-        // Format v1 reserves target_seq 0 for "no target" (spec section 3.1),
-        // so the first entry can never be amended or tombstoned.
-        if (seq == 0) return error.TargetZero;
         return &headers[seq];
     }
 
@@ -274,6 +322,93 @@ pub const Journal = struct {
             try files.append(allocator, .{ .name = name, .bytes = bytes });
         }
         return verifyBytes(allocator, files.items);
+    }
+
+    /// The journal's latest anchor (anchor-format section 6).
+    pub const AnchorCheck = struct {
+        artifact: anchor.Artifact,
+        file_name: []const u8,
+    };
+
+    /// The latest artifact's self-verification or chain-linkage failure. When
+    /// set, the journal must not be trusted.
+    pub const CheckAnchorsFailure = anchor.VerifyError || anchor.ChainError;
+
+    pub const AnchorCheckResult = struct {
+        /// `null` when the journal has no anchors (check skipped) or when the
+        /// latest anchor failed.
+        ok: ?AnchorCheck,
+        /// The latest artifact's file name, when one was found.
+        file_name: ?[]const u8,
+        /// The anchor failure, if any.
+        failure: ?CheckAnchorsFailure,
+    };
+
+    pub const CheckAnchorsError = Allocator.Error || Dir.OpenError || Dir.ReadFileAllocError ||
+        Dir.Iterator.Error || CollectRecordsError;
+
+    /// Runs the anchor check (anchor-format section 6): load the latest
+    /// artifact from `<journal>/anchors/`, verify it, and check chain
+    /// linkage against the journal's records. Returns a null result when no
+    /// anchors exist. I/O failures propagate; anchor verification failures
+    /// are reported in the result, not as errors.
+    pub fn checkAnchors(self: *const Journal, allocator: Allocator) CheckAnchorsError!AnchorCheckResult {
+        const none = AnchorCheckResult{ .ok = null, .file_name = null, .failure = null };
+        const anchors_dir = Dir.openDir(self.dir, self.io, "anchors", .{ .iterate = true }) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => return none,
+            else => return err,
+        };
+        defer Dir.close(anchors_dir, self.io);
+
+        var names = std.ArrayList([]const u8).empty;
+        errdefer names.deinit(allocator);
+        var iter = Dir.iterate(anchors_dir);
+        while (try iter.next(self.io)) |entry| {
+            if (entry.kind != .file) continue;
+            if (!std.mem.endsWith(u8, entry.name, ".zpa")) continue;
+            try names.append(allocator, try allocator.dupe(u8, entry.name));
+        }
+        if (names.items.len == 0) return none;
+
+        // The latest artifact is the one with the highest checkpoint_seq.
+        // The field is read raw so a malformed artifact still identifies as
+        // the latest (and is then reported as the failing one).
+        var best_name: ?[]const u8 = null;
+        var best_seq: u64 = 0;
+        for (names.items) |name| {
+            const bytes = try Dir.readFileAlloc(anchors_dir, self.io, name, allocator, .unlimited);
+            defer allocator.free(bytes);
+            if (bytes.len != anchor.ArtifactLen) continue;
+            const seq = records.readU64(bytes[86..94]);
+            if (best_name == null or seq > best_seq) {
+                best_name = name;
+                best_seq = seq;
+            }
+        }
+        const name = best_name orelse return none;
+
+        const bytes = try Dir.readFileAlloc(anchors_dir, self.io, name, allocator, .unlimited);
+        defer allocator.free(bytes);
+        const artifact = anchor.verifyBytes(bytes) catch |err| {
+            return .{ .ok = null, .file_name = name, .failure = err };
+        };
+
+        const recs = try self.collectRecords(allocator);
+        defer recs.deinit();
+        anchor.checkChain(&artifact, recs.headers) catch |err| {
+            return .{ .ok = null, .file_name = name, .failure = err };
+        };
+        return .{ .ok = .{ .artifact = artifact, .file_name = name }, .file_name = name, .failure = null };
+    }
+
+    /// Writes an anchor artifact to `<journal>/anchors/checkpoint-<seq>.zpa`
+    /// (anchor-format section 5); the anchors directory is created if needed.
+    pub const WriteAnchorError = Allocator.Error || Dir.CreateDirPathError || segment.WriteError;
+
+    pub fn writeAnchorFile(self: *const Journal, allocator: Allocator, checkpoint_seq: u64, bytes: []const u8) WriteAnchorError!void {
+        try Dir.createDirPath(self.dir, self.io, "anchors");
+        const name = try allocator.print("anchors/checkpoint-{d}.zpa", .{checkpoint_seq});
+        try segment.writeAtomic(self.dir, self.io, name, bytes);
     }
 
     fn readFileBytes(self: *const Journal, allocator: Allocator, name: []const u8) Dir.ReadFileAllocError![]u8 {
