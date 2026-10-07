@@ -11,9 +11,9 @@ metadata:
 # Zig API Reference (0.15 / 0.16 / 0.17)
 
 A version-aware API guide for Zig. The language and standard library changed significantly
-across 0.15 → 0.16 → 0.17, so **confirm the target version first, then read the matching
-reference file.** Never mix APIs from different versions — a 0.16 pattern in a 0.15 project
-(or vice versa) is a compile error.
+across 0.15 → 0.16 → 0.17, so **confirm the target version first, then read the reference
+files (see Step 2 — all of them, not just the target version's).** Never mix APIs from
+different versions — a 0.16 pattern in a 0.15 project (or vice versa) is a compile error.
 
 ## Step 1 — Determine the target Zig version
 
@@ -31,7 +31,7 @@ common source of the errors this skill exists to prevent.
 
 Supported versions: **0.15.x**, **0.16.0**, **0.17.0**.
 
-## Step 2 — Read the matching reference
+## Step 2 — Read the reference files
 
 | Target version | Reference file |
 |----------------|----------------|
@@ -39,10 +39,22 @@ Supported versions: **0.15.x**, **0.16.0**, **0.17.0**.
 | 0.16.0         | [references/zig-0.16.md](references/zig-0.16.md) |
 | 0.17.0         | [references/zig-0.17.md](references/zig-0.17.md) |
 
-Read the file for the **target** version. Each is self-contained (critical API changes,
-language changes, std library, build system, common idioms, and a common-error-message table).
+**Read all the reference files, not just the target version's.** Each file documents the
+changes *introduced by that release*, not the complete API surface of that version. The
+standard library is cumulative: an API missing from the target version's file may have been
+introduced in an earlier release and carried forward unchanged (e.g. `std.Io.Timestamp` /
+`std.Io.Clock` are documented under 0.16 and remain the time API in 0.17). Treating the
+target file as self-contained is how carried-forward APIs get missed and changes get
+misattributed to the wrong version.
 
-**Porting across versions?** Read the target version's file, plus the `## Porting Strategy`
+- **Target version's file** — authoritative for the APIs you are about to write.
+- **Earlier versions' files** — where carried-forward APIs came from, and the old shapes to
+  avoid. When two files disagree about the same API, the later version's file wins for code
+  targeting that later version; the earlier entry describes the pre-change shape.
+- **Later versions' files** (when the target is older) — what will break when the project
+  upgrades.
+
+**Porting across versions?** Read every reference file, plus the `## Porting Strategy`
 section of the source version's file.
 
 ## Local documentation first
