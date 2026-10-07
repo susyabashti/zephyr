@@ -99,6 +99,35 @@ const golden =
 
 - A `\\` in the middle of a line (for example after a comma in an argument list)
   does not start a string: `error: expected ',' after argument`.
+- **When the string is followed by more arguments, the comma gets its own
+  line.** The literal ends at the final `\\` line, and that line's content
+  runs to the end of the line — so the separating comma cannot sit "after"
+  the string on the same line. Omit it and the parser finds the next
+  argument where it expects a separator:
+
+```zig
+// avoid — `error: expected ',' after argument` at the final `\\` line
+std.debug.print(
+    \\line {d}
+    \\final
+    .{42},
+);
+```
+
+  The trailing-comma "fix" is a trap: the comma is absorbed into the string
+  (`"line\nfinal,"` — a byte-exact bug) and the same error still fires at
+  `.{42}`.
+
+```zig
+// preferred — comma on its own line; or hoist the format string into a
+// const; or make the string the last argument
+std.debug.print(
+    \\line {d}
+    \\final
+    ,
+    .{42},
+);
+```
 - A single `\` at the start of the line is a parse error:
   `error: expected expression, found 'invalid token'`.
 - For large literals (test fixtures), read a file at test time instead of
