@@ -56,6 +56,33 @@ pub fn build(b: *std.Build) void {
     const phase2_tests = b.addTest(.{ .root_module = phase2_module });
     const run_phase2_tests = b.addRunArtifact(phase2_tests);
 
+    // Phase 3 (fast): cross-segment round trip and sealed-segment tamper
+    // detection on a real on-disk journal.
+    const phase3_module = b.createModule(.{
+        .root_source_file = b.path("test/phase3.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "zephyr_core", .module = core },
+        },
+    });
+    const phase3_tests = b.addTest(.{ .root_module = phase3_module });
+    const run_phase3_tests = b.addRunArtifact(phase3_tests);
+
+    // Phase 3 (slow): the 100k-entry round trip and the bytes-per-entry
+    // measurement. Kept out of `test` because the whole-file rewrite per
+    // append makes the run take minutes.
+    const roundtrip_module = b.createModule(.{
+        .root_source_file = b.path("test/roundtrip.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zephyr_core", .module = core },
+        },
+    });
+    const roundtrip_tests = b.addTest(.{ .root_module = roundtrip_module });
+    const run_roundtrip_tests = b.addRunArtifact(roundtrip_tests);
+    b.step("roundtrip", "Phase 3 gate: 100k-entry round trip (slow)").dependOn(&run_roundtrip_tests.step);
+
     const test_step = b.step("test", "Run tests");
     const core_test_files = [_][]const u8{
         "src/core/records.zig",
@@ -77,6 +104,7 @@ pub fn build(b: *std.Build) void {
     }
     test_step.dependOn(&run_vector_tests.step);
     test_step.dependOn(&run_phase2_tests.step);
+    test_step.dependOn(&run_phase3_tests.step);
 
     const fmt_step = b.step("fmt", "Run format checks");
     fmt_step.dependOn(&b.addFmt(.{ .paths = b.pathList(&.{ "src", "test", "build.zig" }) }).step);

@@ -114,6 +114,7 @@ A single, fully specified byte layout: fixed field order, fixed integer widths a
 - A **sealed** segment has a footer: first/last `seq`, record count, final `record_hash` (the segment head), and a footer hash. The next segment's chain starts from the previous segment's head.
 - Segment files are never modified after sealing, except for payload-region redaction.
 - Initial design stores every `record_hash` for exact tamper localization; Phase 3 measures the cost and may switch to implied hashes with per-block checkpoints if the size target isn't met.
+- **Size target (set in Phase 3, per spec §2):** for the gate profile — 100k entries of 20-char text with one 3-char tag, monthly segments — v1 (uncompressed) measures **190 B/entry** (19,004,632 bytes across 40 segments); naive JSONL for the same entries is **94 B/entry** (ratio 2.02). The difference is the per-record tamper-evidence overhead (32-byte hash prefix, 93-byte header, 32-byte salt), the accepted cost of exact tamper localization (spec §2: store every `record_hash`). **Target: v1 stays at or under 200 B/entry on the gate profile** — a regression ceiling enforced by the `zig build roundtrip` gate. The ratio converges toward ~1.1 as entry text grows; the planned zstd payload codec (v2, spec §2) is the lever if size ever needs to come down.
 - *Optional (Phase 5):* a Merkle root over each segment's records in the footer, so a single entry can be proven authentic without verifying the whole log.
 
 ### 5.6 Crash safety
@@ -228,7 +229,7 @@ Every phase has a deliverable and a pass/fail gate. Do not start the next phase 
 
 - Round trip: write 100k synthetic entries, read back, identical.
 - `verify` works across segment boundaries; tampering with a sealed segment or its footer is detected.
-- Measured bytes per entry meets a target set in Phase 0 (baseline: naive JSONL). If the target is missed, evaluate implied hashes with block checkpoints and re-run the tamper tests.
+- Measured bytes per entry meets the target set in Phase 3 (baseline: naive JSONL; see §5.5). If the target is missed, evaluate implied hashes with block checkpoints and re-run the tamper tests.
 
 ### Phase 4 — LLM view
 
