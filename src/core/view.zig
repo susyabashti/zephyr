@@ -14,16 +14,60 @@ pub const RenderError = Allocator.Error || records.DecodePayloadError || error{
     TimestampOutOfRange,
 };
 
-/// Renders the LLM view for a full record stream (all segments, in order).
-/// An empty stream renders to an empty string (spec section 9).
-pub fn render(allocator: Allocator, headers: []const records.Header, payloads: []const []const u8) RenderError![]u8 {
-    const n = headers.len;
-    if (n == 0) return allocator.alloc(u8, 0);
+/// A civil-day interval, `start` inclusive, `end` exclusive, in days since
+/// the Unix epoch.
+pub const DayRange = struct {
+    start: i64,
+    end: i64,
+};
 
-    // First pass: gather per-entry state. Seq is dense from 0 (verify
-    // guarantees this; the renderer refuses unverified logs at the call site).
+/// One entry as the view shows it: a non-private, non-tombstoned entry with
+/// its effective (latest-amendment) text and tags. `text` and the tag bytes
+/// borrow from the payloads; the `tags` slice-header array is a fresh copy,
+/// released by `Visible.deinit`.
+pub const ViewEntry = struct {
+    seq: u64,
+    ts_ms: u64,
+    tz_offset_min: i16,
+    /// Local civil day the entry is grouped under.
+    day: i64,
+    redacted: bool,
+    edited: bool,
+    text: []const u8,
+    tags: []const []const u8,
+};
+
+pub const Visible = struct {
+    /// In view order: (local day, time, seq).
+    entries: []ViewEntry,
+    tag_lists: [][]const []const u8,
+    allocator: Allocator,
+
+    pub fn deinit(self: Visible) void {
+        const allocator = self.allocator;
+        for (self.tag_lists) |tags| allocator.free(tags);
+        allocator.free(self.tag_lists);
+        allocator.free(self.entries);
+    }
+};
+
+fn viewEntryLessThan(_: void, a: ViewEntry, b: ViewEntry) bool {
+    if (a.day != b.day) return a.day < b.day;
+    if (a.ts_ms != b.ts_ms) return a.ts_ms < b.ts_ms;
+    return a.seq < b.seq;
+}
+
+/// The viewable entries of a verified record stream (spec section 9,
+/// rules 5-8): non-private, non-tombstoned, with the effective text and tags
+/// after amendments (latest amendment wins). The single source of truth for
+/// "what the view shows" — the renderer and search both consume it.
+pub fn visibleEntries(allocator: Allocator, headers: []const records.Header, payloads: []const []const u8) RenderError!Visible {
+    const n = headers.len;
+    if (n == 0) return Visible{ .entries = &.{}, .tag_lists = &.{}, .allocator = allocator };
+
+    // First pass: per-record state. Seq is dense from 0 (verify guarantees
+    // this; callers refuse unverified logs).
     const types = try allocator.alloc(records.RecordType, n);
-    const targets = try allocator.alloc(u64, n);
     const is_private = try allocator.alloc(bool, n);
     const tombstoned = try allocator.alloc(bool, n);
     const redacted = try allocator.alloc(bool, n);
@@ -34,6 +78,16 @@ pub fn render(allocator: Allocator, headers: []const records.Header, payloads: [
     // the result is discarded or later overwritten; track all of them so none
     // leak.
     const tag_slices = try allocator.alloc([]const []const u8, n);
+    errdefer {
+        freeTagSlices(allocator, tag_slices);
+        allocator.free(edited);
+        allocator.free(effective_tags);
+        allocator.free(effective_text);
+        allocator.free(redacted);
+        allocator.free(tombstoned);
+        allocator.free(is_private);
+        allocator.free(types);
+    }
     @memset(tombstoned, false);
     @memset(redacted, false);
     @memset(edited, false);
@@ -44,7 +98,6 @@ pub fn render(allocator: Allocator, headers: []const records.Header, payloads: [
         const payload = try records.decodePayload(allocator, payloads[i]);
         tag_slices[i] = payload.tags;
         types[i] = h.record_type;
-        targets[i] = h.target_seq;
         is_private[i] = h.isPrivate();
         switch (h.record_type) {
             .entry => {
@@ -71,31 +124,70 @@ pub fn render(allocator: Allocator, headers: []const records.Header, payloads: [
         }
     }
 
-    // Second pass: build viewable lines (spec section 9, rules 5-10).
-    errdefer freeTagSlices(allocator, tag_slices);
-    var lines = std.ArrayList(Line).empty;
-    errdefer lines.deinit(allocator);
+    // Second pass: keep the viewable entries, copying their effective tag
+    // lists into owned memory (the per-record decode allocations are freed
+    // before return).
+    const entries = try allocator.alloc(ViewEntry, n);
+    errdefer allocator.free(entries);
+    var tag_lists = std.ArrayList([]const []const u8).empty;
+    errdefer tag_lists.deinit(allocator);
+    var count: usize = 0;
     i = 0;
     while (i < n) : (i += 1) {
-        if (types[i] != .entry) continue;
-        if (is_private[i]) continue;
-        if (tombstoned[i]) continue;
+        if (types[i] != .entry or is_private[i] or tombstoned[i]) continue;
         const h = headers[i];
         const day = localDay(h.timestamp_ms, h.tz_offset_min) catch return error.TimestampOutOfRange;
-        try lines.append(allocator, Line{
-            .day = day,
+        const etags = effective_tags[i];
+        const tag_copy = try allocator.alloc([]const u8, etags.len);
+        errdefer allocator.free(tag_copy);
+        for (tag_copy, etags) |*slot, tag| slot.* = tag;
+        try tag_lists.append(allocator, tag_copy);
+        entries[count] = .{
+            .seq = h.seq,
             .ts_ms = h.timestamp_ms,
             .tz_offset_min = h.tz_offset_min,
-            .seq = h.seq,
+            .day = day,
             .redacted = redacted[i],
             .edited = edited[i],
             .text = effective_text[i],
-            .tags = effective_tags[i],
-        });
+            .tags = tag_copy,
+        };
+        count += 1;
     }
-    std.mem.sort(Line, lines.items, {}, lineLessThan);
+    std.mem.sort(ViewEntry, entries[0..count], {}, viewEntryLessThan);
 
-    // Emit.
+    const owned_tag_lists = try tag_lists.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_tag_lists);
+    // Success path: release the first-pass scratch arrays (the errdefer above
+    // covers them on error, but never runs after this point).
+    freeTagSlices(allocator, tag_slices);
+    allocator.free(edited);
+    allocator.free(effective_tags);
+    allocator.free(effective_text);
+    allocator.free(redacted);
+    allocator.free(tombstoned);
+    allocator.free(is_private);
+    allocator.free(types);
+    return Visible{ .entries = entries[0..count], .tag_lists = owned_tag_lists, .allocator = allocator };
+}
+
+/// Renders the LLM view for a full record stream (all segments, in order).
+/// An empty stream renders to an empty string (spec section 9).
+pub fn render(allocator: Allocator, headers: []const records.Header, payloads: []const []const u8) RenderError![]u8 {
+    return renderRange(allocator, headers, payloads, null);
+}
+
+/// Renders the view restricted to entries whose local day falls in `range`
+/// (start inclusive, end exclusive). The provenance line still describes the
+/// whole log; a non-empty log with no entries in range renders as just that
+/// line.
+pub fn renderRange(allocator: Allocator, headers: []const records.Header, payloads: []const []const u8, range: ?DayRange) RenderError![]u8 {
+    const n = headers.len;
+    if (n == 0) return allocator.alloc(u8, 0);
+
+    const visible = try visibleEntries(allocator, headers, payloads);
+    defer visible.deinit();
+
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
     const last = headers[n - 1];
@@ -104,60 +196,45 @@ pub fn render(allocator: Allocator, headers: []const records.Header, payloads: [
     try out.append(allocator, '\n');
 
     var current_day: ?i64 = null;
-    for (lines.items) |line| {
-        if (current_day == null or current_day.? != line.day) {
-            const date = civilDate(line.day) catch return error.TimestampOutOfRange;
-            try tryLine(allocator, &out, "# {d:0>4}-{d:0>2}-{d:0>2} {s}", .{ date.year, date.month, date.day, weekdayName(line.day) });
-            try out.append(allocator, '\n');
-            current_day = line.day;
+    for (visible.entries) |entry| {
+        if (range) |r| {
+            if (entry.day < r.start or entry.day >= r.end) continue;
         }
-        const time = timeString(line.ts_ms, line.tz_offset_min);
+        if (current_day == null or current_day.? != entry.day) {
+            const date = civilDate(entry.day) catch return error.TimestampOutOfRange;
+            try tryLine(allocator, &out, "# {d:0>4}-{d:0>2}-{d:0>2} {s}", .{ date.year, date.month, date.day, weekdayName(entry.day) });
+            try out.append(allocator, '\n');
+            current_day = entry.day;
+        }
+        const time = timeString(entry.ts_ms, entry.tz_offset_min);
         var line_buf: [1 << 16]u8 = undefined;
         var written: usize = 0;
         written += (std.fmt.bufPrint(line_buf[written..], "{s}", .{time}) catch unreachable).len;
-        if (line.redacted) {
+        if (entry.redacted) {
             written += (std.fmt.bufPrint(line_buf[written..], " [redacted]", .{}) catch unreachable).len;
         } else {
-            if (line.edited) {
+            if (entry.edited) {
                 written += (std.fmt.bufPrint(line_buf[written..], " (edited)", .{}) catch unreachable).len;
             }
-            if (line.tags.len > 0) {
+            if (entry.tags.len > 0) {
                 line_buf[written] = ' ';
                 written += 1; // space before the tag block
-                for (line.tags) |tag| {
+                for (entry.tags) |tag| {
                     written += (std.fmt.bufPrint(line_buf[written..], "[{s}]", .{tag}) catch unreachable).len;
                 }
             }
             line_buf[written] = ' ';
             written += 1; // space before the text
-            written += (std.fmt.bufPrint(line_buf[written..], "{s}", .{line.text}) catch unreachable).len;
+            written += (std.fmt.bufPrint(line_buf[written..], "{s}", .{entry.text}) catch unreachable).len;
         }
         try out.appendSlice(allocator, line_buf[0..written]);
         try out.append(allocator, '\n');
     }
-    freeTagSlices(allocator, tag_slices);
     return out.toOwnedSlice(allocator);
 }
 
 fn freeTagSlices(allocator: Allocator, tag_slices: [][]const []const u8) void {
     for (tag_slices) |tags| allocator.free(tags);
-}
-
-const Line = struct {
-    day: i64,
-    ts_ms: u64,
-    tz_offset_min: i16,
-    seq: u64,
-    redacted: bool,
-    edited: bool,
-    text: []const u8,
-    tags: []const []const u8,
-};
-
-fn lineLessThan(_: void, a: Line, b: Line) bool {
-    if (a.day != b.day) return a.day < b.day;
-    if (a.ts_ms != b.ts_ms) return a.ts_ms < b.ts_ms;
-    return a.seq < b.seq;
 }
 
 fn tryLine(allocator: Allocator, out: *std.ArrayList(u8), comptime fmt: []const u8, args: anytype) Allocator.Error!void {
@@ -176,20 +253,20 @@ fn writeHexLower(allocator: Allocator, out: *std.ArrayList(u8), bytes: []const u
 
 /// Local civil day (days since Unix epoch) of a timestamp under a fixed
 /// minute offset — the "local date" the view groups by (spec section 9, rule 2).
-fn localDay(ts_ms: u64, tz_offset_min: i16) !i64 {
+pub fn localDay(ts_ms: u64, tz_offset_min: i16) !i64 {
     if (ts_ms > std.math.maxInt(i64)) return error.TimestampOutOfRange;
     const ts: i64 = @intCast(ts_ms);
     const local_ms: i64 = ts + @as(i64, tz_offset_min) * 60_000;
     return @divFloor(local_ms, 86_400_000);
 }
 
-const CivilDate = struct {
+pub const CivilDate = struct {
     year: u16,
     month: u4,
     day: u5,
 };
 
-fn civilDate(days: i64) !CivilDate {
+pub fn civilDate(days: i64) !CivilDate {
     if (days < 0) return error.TimestampOutOfRange;
     const epoch_day = epoch.EpochDay{ .day = @intCast(days) };
     const year_day = epoch_day.calculateYearDay();
@@ -201,6 +278,37 @@ fn civilDate(days: i64) !CivilDate {
     };
 }
 
+/// Civil day (days since the Unix epoch) of the proleptic Gregorian date
+/// `year-month-day`, or null if the date does not exist (e.g. Feb 30).
+pub fn dateToCivilDay(year: i64, month: u64, day: u64) ?i64 {
+    if (year < 1 or month < 1 or month > 12 or day < 1 or day > 31) return null;
+    const m: i64 = @intCast(month);
+    const d: i64 = @intCast(day);
+    const days = daysFromCivil(year, m, d);
+    if (days < 0) return null;
+    const c = civilDate(days) catch return null;
+    if (c.year != @as(u16, @intCast(year)) or @as(u64, c.month) != month or @as(u64, c.day) != day) return null;
+    return days;
+}
+
+/// Howard Hinnant's days_from_civil: days since 1970-01-01 for a proleptic
+/// Gregorian date.
+fn daysFromCivil(y: i64, m: i64, d: i64) i64 {
+    var yy = y;
+    if (m <= 2) yy -= 1;
+    const era: i64 = @divFloor(if (yy >= 0) yy else yy - 399, 400);
+    const yoe = yy - era * 400; // [0, 399]
+    const mp: i64 = if (m > 2) m - 3 else m + 9; // [0, 11]
+    const doy = @divFloor(153 * mp + 2, 5) + d - 1; // [0, 365]
+    const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy; // [0, 146096]
+    return era * 146097 + doe - 719_468;
+}
+
+/// The Monday (as a civil day) of the ISO week containing `day`.
+pub fn weekStart(day: i64) i64 {
+    return day - @as(i64, @mod(day + 3, 7));
+}
+
 /// Unix epoch day 0 (1970-01-01) was a Thursday.
 fn weekdayName(days: i64) []const u8 {
     const names = [_][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
@@ -209,7 +317,7 @@ fn weekdayName(days: i64) []const u8 {
 }
 
 /// Local HH:MM of a timestamp under a fixed minute offset.
-fn timeString(ts_ms: u64, tz_offset_min: i16) [5]u8 {
+pub fn timeString(ts_ms: u64, tz_offset_min: i16) [5]u8 {
     // render() rejects out-of-range timestamps via localDay before calling this.
     if (ts_ms > std.math.maxInt(i64)) unreachable;
     const ts: i64 = @intCast(ts_ms);
@@ -271,6 +379,127 @@ test "local date rolls past midnight" {
     const out = try render(allocator, &.{entry.header}, &.{entry.payload});
     const expected = try allocator.print("# zephyr: seq 0..0 head={s}\n# 2026-01-02 Fri\n01:30 hello\n", .{hexOf(&entry.header.record_hash)});
     try std.testing.expectEqualStrings(expected, out);
+}
+
+test "renderRange filters by local day and keeps the provenance line" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Two entries on different local days, chained from genesis, +120 offset.
+    // e0: 2026-01-15T23:45:00Z -> local 2026-01-16 01:45 (crosses midnight)
+    // e1: 2026-01-17T22:00:00Z -> local 2026-01-18 00:00 (exactly midnight)
+    const genesis = records.Header.GenesisHash;
+    const e0 = try makeEntry(allocator, "before midnight", 1_768_520_700_000, 120, &genesis);
+    var e1 = try makeEntry(allocator, "at midnight", 1_768_687_200_000, 120, &e0.header.record_hash);
+    e1.header.seq = 1;
+    e1.header.record_hash = recompute(&e1.header, &e0.header.record_hash);
+    const headers = [_]records.Header{ e0.header, e1.header };
+    const payloads = [_][]const u8{ e0.payload, e1.payload };
+
+    const day16 = dateToCivilDay(2026, 1, 16) orelse unreachable;
+    const day17 = dateToCivilDay(2026, 1, 17) orelse unreachable;
+    const day18 = dateToCivilDay(2026, 1, 18) orelse unreachable;
+
+    // Only the entry whose local day is 2026-01-16, even though its UTC date
+    // is 2026-01-15.
+    const got = try renderRange(allocator, &headers, &payloads, .{ .start = day16, .end = day16 + 1 });
+    const head_hex = hexOf(&e1.header.record_hash);
+    const want = try allocator.print("# zephyr: seq 0..1 head={s}\n# 2026-01-16 Fri\n01:45 before midnight\n", .{head_hex});
+    try std.testing.expectEqualStrings(want, got);
+
+    // The empty range renders as just the provenance line.
+    const empty = try renderRange(allocator, &headers, &payloads, .{ .start = day17, .end = day17 + 1 });
+    const want_empty = try allocator.print("# zephyr: seq 0..1 head={s}\n", .{head_hex});
+    try std.testing.expectEqualStrings(want_empty, empty);
+
+    // The entry at exactly local midnight belongs to 2026-01-18, not 01-17.
+    const at_midnight = try renderRange(allocator, &headers, &payloads, .{ .start = day18, .end = day18 + 1 });
+    const want_midnight = try allocator.print("# zephyr: seq 0..1 head={s}\n# 2026-01-18 Sun\n00:00 at midnight\n", .{head_hex});
+    try std.testing.expectEqualStrings(want_midnight, at_midnight);
+}
+
+test "dateToCivilDay and weekStart" {
+    // 2026-01-16 is a Friday (2026-01-01 is a Thursday).
+    const friday = dateToCivilDay(2026, 1, 16) orelse unreachable;
+    try std.testing.expectEqualStrings("Fri", weekdayName(friday));
+    // 2026-09-14 is a Monday (the README example).
+    const monday = dateToCivilDay(2026, 9, 14) orelse unreachable;
+    try std.testing.expectEqualStrings("Mon", weekdayName(monday));
+    try std.testing.expectEqual(monday, weekStart(monday));
+    try std.testing.expectEqual(monday + 7, weekStart(monday + 7));
+    // The Monday of the week containing 2026-01-16 (a Friday) is 2026-01-12.
+    const jan12 = dateToCivilDay(2026, 1, 12) orelse unreachable;
+    try std.testing.expectEqualStrings("Mon", weekdayName(jan12));
+    try std.testing.expectEqual(jan12, weekStart(friday));
+    // Leap-year boundary.
+    const leap = dateToCivilDay(2028, 2, 29) orelse unreachable;
+    try std.testing.expectEqualStrings("Tue", weekdayName(leap));
+    // Invalid dates.
+    try std.testing.expect(dateToCivilDay(2026, 2, 29) == null);
+    try std.testing.expect(dateToCivilDay(2026, 13, 1) == null);
+    try std.testing.expect(dateToCivilDay(2026, 0, 1) == null);
+    try std.testing.expect(dateToCivilDay(2026, 4, 31) == null);
+    // Round trip through civilDate.
+    const c = try civilDate(friday);
+    try std.testing.expectEqual(@as(u16, 2026), c.year);
+    try std.testing.expectEqual(@as(u64, 1), @as(u64, c.month));
+    try std.testing.expectEqual(@as(u64, 16), @as(u64, c.day));
+}
+
+test "visibleEntries: amendments, tombstones, private, ordering" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const genesis = records.Header.GenesisHash;
+    // seq 0: entry; seq 1: private entry; seq 2: entry to amend; seq 3: entry
+    // to tombstone; seq 4: amendment -> 2; seq 5: tombstone -> 3.
+    const h0 = try makeEntry(allocator, "a", 1_767_225_600_000, 0, &genesis);
+    var h1 = try makeEntry(allocator, "secret", 1_767_225_660_000, 0, &h0.header.record_hash);
+    var h2 = try makeEntry(allocator, "original", 1_767_225_720_000, 0, &h1.header.record_hash);
+    var h3 = try makeEntry(allocator, "doomed", 1_767_225_780_000, 0, &h2.header.record_hash);
+    var h4 = try makeEntry(allocator, "amended", 1_767_312_000_000, 0, &h3.header.record_hash);
+    var h5 = try makeEntry(allocator, "", 1_767_312_060_000, 0, &h4.header.record_hash);
+    // makeEntry stamps seq 0; set the real header fields and re-hash (seq is
+    // in the hashed prefix).
+    h1.header.flags = records.FlagPrivate;
+    h2.header.seq = 2;
+    h3.header.seq = 3;
+    h4.header.record_type = .amendment;
+    h4.header.target_seq = 2;
+    h4.header.seq = 4;
+    h5.header.record_type = .tombstone;
+    h5.header.target_seq = 3;
+    h5.header.seq = 5;
+    h1.header.record_hash = recompute(&h1.header, &h0.header.record_hash);
+    h2.header.record_hash = recompute(&h2.header, &h1.header.record_hash);
+    h3.header.record_hash = recompute(&h3.header, &h2.header.record_hash);
+    h4.header.record_hash = recompute(&h4.header, &h3.header.record_hash);
+    h5.header.record_hash = recompute(&h5.header, &h4.header.record_hash);
+
+    const headers = [_]records.Header{ h0.header, h1.header, h2.header, h3.header, h4.header, h5.header };
+    const payloads = [_][]const u8{ h0.payload, h1.payload, h2.payload, h3.payload, h4.payload, h5.payload };
+
+    const visible = try visibleEntries(allocator, &headers, &payloads);
+    defer visible.deinit();
+    try std.testing.expectEqual(@as(usize, 2), visible.entries.len);
+    // The private and tombstoned entries are gone.
+    try std.testing.expectEqual(@as(u64, 0), visible.entries[0].seq);
+    try std.testing.expectEqualStrings("a", visible.entries[0].text);
+    try std.testing.expectEqual(@as(u64, 2), visible.entries[1].seq);
+    // Latest amendment wins, and the entry is marked edited.
+    try std.testing.expectEqualStrings("amended", visible.entries[1].text);
+    try std.testing.expect(visible.entries[1].edited);
+}
+
+fn recompute(header: *records.Header, prev: *const [records.DigestLen]u8) [records.DigestLen]u8 {
+    var prefix: [records.HeaderPrefixLen]u8 = undefined;
+    header.record_hash = @splat(0); // record_hash is not in the prefix; zero for clarity
+    header.prefixBytes(&prefix);
+    return records.computeRecordHash(&prefix, prev);
 }
 
 test "provenance line uses final record hash" {

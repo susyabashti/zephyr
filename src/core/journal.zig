@@ -189,30 +189,75 @@ pub const Journal = struct {
         return next_seq;
     }
 
-    /// All records of the journal in order (headers + raw payloads).
-    pub fn collectRecords(self: *const Journal, allocator: Allocator) Allocator.Error!struct {
+    /// All records of the journal in order. The payloads borrow from the raw
+    /// segment bytes in `files`, so call `deinit` to release everything.
+    pub const RecordSet = struct {
         headers: []const records.Header,
         payloads: []const []const u8,
-    } {
+        /// Raw segment file bytes, in chronological order.
+        files: [][]const u8,
+        allocator: Allocator,
+
+        pub fn deinit(self: RecordSet) void {
+            const allocator = self.allocator;
+            for (self.files) |bytes| allocator.free(bytes);
+            allocator.free(self.files);
+            allocator.free(self.payloads);
+            allocator.free(self.headers);
+        }
+    };
+
+    pub const CollectRecordsError = Allocator.Error || Dir.ReadFileAllocError || Dir.Iterator.Error ||
+        segment.ParseError;
+
+    pub fn collectRecords(self: *const Journal, allocator: Allocator) CollectRecordsError!RecordSet {
         const names = try self.listSegments(allocator);
         defer allocator.free(names);
         var headers = std.ArrayList(records.Header).empty;
         errdefer headers.deinit(allocator);
         var payloads = std.ArrayList([]const u8).empty;
         errdefer payloads.deinit(allocator);
+        var files = std.ArrayList([]const u8).empty;
+        errdefer files.deinit(allocator);
         for (names) |name| {
+            // The file bytes must outlive the loop: the payload slices parsed
+            // out of them are kept in `payloads`.
             const bytes = try self.readFileBytes(allocator, name);
-            defer allocator.free(bytes);
+            try files.append(allocator, bytes);
             var fail_index: usize = std.math.maxInt(usize);
-            const seg = try segment.parse(allocator, name, bytes, &fail_index);
+            var seg = try segment.parse(allocator, name, bytes, &fail_index);
             for (seg.records) |h| try headers.append(allocator, h);
             for (seg.payloads) |p| try payloads.append(allocator, p);
             seg.deinit(allocator);
         }
-        return .{
-            .headers = headers.toOwnedSlice(allocator),
-            .payloads = payloads.toOwnedSlice(allocator),
+        const owned_headers = try headers.toOwnedSlice(allocator);
+        errdefer allocator.free(owned_headers);
+        const owned_payloads = try payloads.toOwnedSlice(allocator);
+        errdefer allocator.free(owned_payloads);
+        const owned_files = try files.toOwnedSlice(allocator);
+        errdefer allocator.free(owned_files);
+        return RecordSet{
+            .headers = owned_headers,
+            .payloads = owned_payloads,
+            .files = owned_files,
+            .allocator = allocator,
         };
+    }
+
+    /// Names the entry that an amendment or tombstone may target.
+    pub const ResolveTargetError = error{
+        TargetNotFound,
+        TargetNotEntry,
+        TargetZero,
+    };
+
+    pub fn resolveEditTarget(headers: []const records.Header, seq: u64) ResolveTargetError!*const records.Header {
+        if (seq >= headers.len) return error.TargetNotFound;
+        if (headers[seq].record_type != .entry) return error.TargetNotEntry;
+        // Format v1 reserves target_seq 0 for "no target" (spec section 3.1),
+        // so the first entry can never be amended or tombstoned.
+        if (seq == 0) return error.TargetZero;
+        return &headers[seq];
     }
 
     /// Full integrity check (spec section 8). Never frees caller-visible

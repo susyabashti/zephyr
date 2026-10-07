@@ -45,6 +45,17 @@ pub fn build(b: *std.Build) void {
     const vector_tests = b.addTest(.{ .root_module = vector_module });
     const run_vector_tests = b.addRunArtifact(vector_tests);
 
+    // Phase 2: views, amendments, tombstones, search (fixture journal on disk).
+    const phase2_module = b.createModule(.{
+        .root_source_file = b.path("test/phase2.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "zephyr_core", .module = core },
+        },
+    });
+    const phase2_tests = b.addTest(.{ .root_module = phase2_module });
+    const run_phase2_tests = b.addRunArtifact(phase2_tests);
+
     const test_step = b.step("test", "Run tests");
     const core_test_files = [_][]const u8{
         "src/core/records.zig",
@@ -65,6 +76,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_core_tests.step);
     }
     test_step.dependOn(&run_vector_tests.step);
+    test_step.dependOn(&run_phase2_tests.step);
 
     const fmt_step = b.step("fmt", "Run format checks");
     fmt_step.dependOn(&b.addFmt(.{ .paths = b.pathList(&.{ "src", "test", "build.zig" }) }).step);

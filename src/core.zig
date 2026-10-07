@@ -8,5 +8,6 @@ pub const records = @import("core/records.zig");
 pub const segment = @import("core/segment.zig");
 pub const journal = @import("core/journal.zig");
 pub const view = @import("core/view.zig");
+pub const search = @import("core/search.zig");
 pub const timezone = @import("core/timezone.zig");
 pub const nfc = @import("core/nfc.zig");
