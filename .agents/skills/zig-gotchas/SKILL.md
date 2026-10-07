@@ -323,6 +323,19 @@ std.debug.print("line: {s}\n", .{line});
 - `zig fmt` rewrites files; `zig fmt --check` exits non-zero without writing
   (the CI gate); a build step made with `b.addFmt` rewrites.
 
+- **Test artifacts run under the build system carry the runner protocol flag.**
+  `zig build` executes test binaries with `--listen=-` (a stdio protocol between
+  the build and the runner). Copying that exact invocation and running the binary
+  by hand panics instantly — the protocol sees EOF on its command channel:
+
+```
+0.17.0thread 559293 panic: internal test runner failure: EndOfStream
+```
+
+  Drop the `--listen=-` flag (and `--seed` if you want a stable order) to run the
+  binary directly; the `failed command:` line in the build output is the build
+  system's own invocation, not a shell command to reuse.
+
 ## 12. A non-void value must be used
 
 Every expression that yields a value must be bound or explicitly discarded —
@@ -346,3 +359,63 @@ const seq = try journal.appendRecord(allocator, .entry, 0, "first day", &.{}, ts
 
 - It bites most in tests, where the habit is to `try` a builder call purely for
   its side effects.
+
+## 13. Literal braces in format strings must be doubled
+
+`std.fmt` format strings are sequences of `{placeholder}` tokens. A literal `{`
+or `}` that belongs to the *output* (JSON braces and the like) must be written
+`{{` / `}}`. A lone one is parsed as a placeholder and fails at **comptime**
+with an error that points inside the standard library, not at your string:
+
+```
+/opt/.../lib/zig/std/fmt.zig:130:27: error: expected . or }, found '{'
+            if (b != '.') @compileError("expected . or }, found '" ++ &[1]u8{b} ++ "'");
+```
+
+```zig
+// avoid — the JSON braces are parsed as placeholder syntax
+std.fmt.bufPrint(&buf, "{\"ts_ms\":{d}}", .{ts});
+// error: expected . or }, found '{'
+
+// preferred — double the literal braces
+const line = std.fmt.bufPrint(&buf, "{{\"ts_ms\":{d},\"tags\":[\"gen\"]}}\n", .{ts}) catch unreachable;
+```
+
+- The error names the first brace it chokes on, which can be far from where you
+  look. When a comptime fmt error cites a character that is obviously literal
+  text in your string, the diagnosis is almost always an unescaped brace.
+
+## 14. An arena allocator in a hot loop grows without bound
+
+`ArenaAllocator` never frees individual allocations. If you hand the arena to a
+function that **allocates and frees on each call** (one that re-reads files on
+every append, re-extends buffers), every iteration's allocations are retained:
+live memory grows with the amount of work (quadratically if per-iteration size
+grows). The process is eventually OOM-killed — with **no Zig output at all**,
+and the kill lands far from the cause:
+
+```
+error: 'roundtrip.test.phase 3: 100k-entry round trip' terminated with signal KILL
+```
+
+(signal KILL with no panic message, not the ABRT/segfault of the stale-binary
+crashes in section 11.)
+
+```zig
+// avoid — the arena retains every file read inside appendRecord
+while (i < N) : (i += 1) {
+    _ = try journal.appendRecord(arena.allocator(), ...);
+}
+
+// preferred — pass an allocator that actually frees; keep the arena for
+// results the test must retain until the end
+while (i < N) : (i += 1) {
+    _ = try journal.appendRecord(std.heap.page_allocator, ...);
+}
+```
+
+- This is not a leak in the section-7 sense: the arena exits "cleanly" (its
+  `deinit` frees everything at once), so the test allocator never complains. The
+  failure is total memory exhaustion, not a leak report.
+- A small loop hides it (a few hundred iterations × hundreds of KB is
+  invisible); the same code at 100k iterations dies.
