@@ -71,6 +71,17 @@ pub fn build(b: *std.Build) void {
     // Phase 3 (slow): the 100k-entry round trip and the bytes-per-entry
     // measurement. Kept out of `test` because the whole-file rewrite per
     // append makes the run take minutes.
+    // Phase 4: LLM export gate (private exclusion, refusal, tokens).
+    const phase4_module = b.createModule(.{
+        .root_source_file = b.path("test/phase4.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "zephyr_core", .module = core },
+        },
+    });
+    const phase4_tests = b.addTest(.{ .root_module = phase4_module });
+    const run_phase4_tests = b.addRunArtifact(phase4_tests);
+
     const roundtrip_module = b.createModule(.{
         .root_source_file = b.path("test/roundtrip.zig"),
         .target = target,
@@ -105,6 +116,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_vector_tests.step);
     test_step.dependOn(&run_phase2_tests.step);
     test_step.dependOn(&run_phase3_tests.step);
+    test_step.dependOn(&run_phase4_tests.step);
 
     const fmt_step = b.step("fmt", "Run format checks");
     fmt_step.dependOn(&b.addFmt(.{ .paths = b.pathList(&.{ "src", "test", "build.zig" }) }).step);

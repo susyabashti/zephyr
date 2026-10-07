@@ -115,6 +115,7 @@ A single, fully specified byte layout: fixed field order, fixed integer widths a
 - Segment files are never modified after sealing, except for payload-region redaction.
 - Initial design stores every `record_hash` for exact tamper localization; Phase 3 measures the cost and may switch to implied hashes with per-block checkpoints if the size target isn't met.
 - **Size target (set in Phase 3, per spec §2):** for the gate profile — 100k entries of 20-char text with one 3-char tag, monthly segments — v1 (uncompressed) measures **190 B/entry** (19,004,632 bytes across 40 segments); naive JSONL for the same entries is **94 B/entry** (ratio 2.02). The difference is the per-record tamper-evidence overhead (32-byte hash prefix, 93-byte header, 32-byte salt), the accepted cost of exact tamper localization (spec §2: store every `record_hash`). **Target: v1 stays at or under 200 B/entry on the gate profile** — a regression ceiling enforced by the `zig build roundtrip` gate. The ratio converges toward ~1.1 as entry text grows; the planned zstd payload codec (v2, spec §2) is the lever if size ever needs to come down.
+- **Token target (set in Phase 4, per spec §2):** for the same entry profile (20-char text, one 3-char tag, UTC), the LLM view renders **8.80 tokens/entry** (35,215 bytes over 10k entries, measured with the standard ~4-chars-per-token heuristic) vs **23.50 tokens/entry** for the naive JSONL baseline — a ratio of **0.37**, i.e. the view fits in about a third of the tokens. **Target: the LLM view stays at or under 9.0 tokens/entry on this profile** — a regression ceiling enforced by the Phase 4 gate test. The view is the deterministic renderer of section 6; its byte layout is pinned in `spec/vectors/journals.json` (`expect.view`) and checked by both implementations.
 - *Optional (Phase 5):* a Merkle root over each segment's records in the footer, so a single entry can be proven authentic without verifying the whole log.
 
 ### 5.6 Crash safety
@@ -241,7 +242,7 @@ Every phase has a deliverable and a pass/fail gate. Do not start the next phase 
 **Gate**
 
 - Same input produces byte-identical output across runs and across independent implementations (vectors).
-- Token count per entry beats raw JSON by a measured margin (target set in Phase 0).
+- Token count per entry beats raw JSON by a measured margin (target: see §5.5).
 - Renderer refuses to run on a failing log.
 - No `private` content ever appears in output (tested).
 

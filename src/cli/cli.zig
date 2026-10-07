@@ -1,6 +1,7 @@
 //! CLI: zephyr <text>  |  zephyr log [-t TAG]... <text>  |  zephyr verify
 //!     zephyr today | yesterday | week | on YYYY-MM-DD  |  zephyr search <q>
 //!     zephyr edit <seq> [-t TAG]... <text>  |  zephyr rm <seq>
+//!     zephyr export --for-ai [YYYY-MM-DD[:YYYY-MM-DD]]
 //!
 //! Exit codes: 0 ok, 1 integrity or journal error, 2 usage error.
 
@@ -72,6 +73,8 @@ pub fn run(init: std.process.Init, args: []const []const u8) RunError!void {
             if (rest.len != 1) return error.Usage;
             const day = parseCivilDate(rest[0]) orelse return error.Usage;
             try runRangeView(arena, io, err_file, out, init.environ_map, path, .{ .start = day, .end = day + 1 });
+        } else if (std.mem.eql(u8, command, "export")) {
+            try runExport(arena, io, err_file, out, init.environ_map, path, rest);
         } else if (std.mem.eql(u8, command, "search")) {
             try runSearch(arena, io, err_file, out, init.environ_map, path, rest);
         } else if (std.mem.eql(u8, command, "edit")) {
@@ -93,7 +96,7 @@ fn isCommand(s: []const u8) bool {
         std.mem.eql(u8, s, "today") or std.mem.eql(u8, s, "yesterday") or
         std.mem.eql(u8, s, "week") or std.mem.eql(u8, s, "on") or
         std.mem.eql(u8, s, "search") or std.mem.eql(u8, s, "edit") or
-        std.mem.eql(u8, s, "rm");
+        std.mem.eql(u8, s, "rm") or std.mem.eql(u8, s, "export");
 }
 
 // ---------------------------------------------------------------- log
@@ -322,6 +325,54 @@ fn effectiveTagsOf(
     return result orelse unreachable; // resolveEditTarget guarantees the entry exists
 }
 
+// ---------------------------------------------------------------- export
+
+fn runExport(
+    arena: Allocator,
+    io: Io,
+    err_file: File,
+    out: File,
+    environ_map: *const std.process.Environ.Map,
+    path: []const u8,
+    rest: []const []const u8,
+) RunError!void {
+    // export --for-ai [YYYY-MM-DD[:YYYY-MM-DD]]
+    if (rest.len < 1 or rest.len > 2 or !std.mem.eql(u8, rest[0], "--for-ai")) {
+        try printUsage(File.stderr(), io);
+        return error.Usage;
+    }
+    var range: ?core.view.DayRange = null;
+    if (rest.len == 2) {
+        range = parseDayRange(rest[1]) orelse {
+            try printUsage(File.stderr(), io);
+            return error.Usage;
+        };
+    }
+    const journal = try openReadJournal(arena, io, err_file, environ_map, path);
+    defer journal.close();
+    const rendered = core.exporter.render(arena, &journal, range) catch |err| switch (err) {
+        // Refused before rendering; re-verify only to report the position.
+        error.VerifyFailed => {
+            const result = try journal.verify(arena);
+            try reportIssue(err_file, io, arena, result.issue.?);
+            return error.VerifyFailed;
+        },
+        else => return err,
+    };
+    try printBlock(out, io, rendered);
+}
+
+/// `YYYY-MM-DD` (one day) or `YYYY-MM-DD:YYYY-MM-DD` (inclusive range).
+fn parseDayRange(s: []const u8) ?core.view.DayRange {
+    const split = std.mem.indexOfScalar(u8, s, ':');
+    const start = parseCivilDate(s[0 .. split orelse s.len]) orelse return null;
+    if (split) |c| {
+        const end = parseCivilDate(s[c + 1 ..]) orelse return null;
+        return core.view.DayRange{ .start = start, .end = end + 1 };
+    }
+    return core.view.DayRange{ .start = start, .end = start + 1 };
+}
+
 // ---------------------------------------------------------------- verify
 
 fn runVerify(
@@ -502,6 +553,9 @@ fn printUsage(file: File, io: Io) File.Writer.Error!void {
         \\                                   -t is given)
         \\  zephyr rm <seq>                   hide an entry (tombstone)
         \\  zephyr verify                     full integrity check
+        \\  zephyr export --for-ai [range]   LLM view of the log (refuses a
+        \\                                   failing log); range: YYYY-MM-DD or
+        \\                                   YYYY-MM-DD:YYYY-MM-DD
         \\
         \\Options:
         \\  --journal PATH    journal directory (default: $ZEPHYR_HOME or
