@@ -8,12 +8,15 @@ description: >
   pointers, `@as` is not an integer cast, `@intCast` needs a known result type, slices
   of stack-local arrays dangle (segfault far from the cause), error-set algebra
   (superset rule, exhaustive switches break far away, named `<FnName>Error` sets),
-  padded signed fmt prints `+`, `zig build test` is silent on success, `std.json` `?T`
-  fields must be present, `comptime assert` is not a statement. Use when writing or
-  debugging Zig code, when tests mysteriously do not run, when a segfault has no
-  obvious cause, on "error set" compile errors, or when multi-line string, fmt, or
-  JSON parsing misbehaves. Companion to zig-api (version-specific APIs) and
-  zig-tiger-style (style) — this skill covers neither.
+  padded signed fmt prints `+`, `zig build test` is silent on success, stale
+  `.zig-cache` test binaries fake crashes from old revisions, `std.json` `?T`
+  fields must be present, `comptime assert` is not a statement, discarding a
+  non-void value needs `_ =`. Use when writing or debugging Zig code, when tests
+  mysteriously do not run, when a segfault has no obvious cause, when a crash
+  trace's line numbers do not match the source on disk, on "error set" compile
+  errors, or when multi-line string, fmt, or JSON parsing misbehaves. Companion to
+  zig-api (version-specific APIs) and zig-tiger-style (style) — this skill covers
+  neither.
 metadata:
   language: "zig"
   category: "programming-language"
@@ -74,7 +77,24 @@ const json =
     \\ ]
     \\}
 ;
-// json is: {"a": 1,\n "b": [\n  2\n ]\n}\n
+// json is: {"a": 1,\n "b": [\n  2\n ]\n}   (note: NO trailing newline)
+```
+
+- **The literal does not end with a newline.** The newline terminating the final
+  `\\` line is unescaped, so it is not part of the string. Each `\\` line
+  contributes its content plus the newline *introduced by the next* `\\`.
+  A byte-exact golden that should end in `\n` comes out exactly one byte short,
+  and the mismatch renders invisible in a side-by-side print
+  (`view mismatch (got 203 bytes, want 202 bytes)` with identical-looking text).
+  To end the string in a newline, add a bare `\\` line:
+
+```zig
+const golden =
+    \\line one
+    \\line two
+    \\
+;
+// golden is: line one\nline two\n
 ```
 
 - A `\\` in the middle of a line (for example after a comma in an argument list)
@@ -272,6 +292,26 @@ comptime {
 - **`zig build test` is silent on success.** Per-test output appears only on
   failure. Use `zig build test --summary all` for the step tree, or run the test
   binary directly (`.zig-cache/o/<hash>/test`) to see every test name.
+
+- **`.zig-cache/o/` accumulates test binaries from every past build state,**
+  including intermediate revisions that did not compile or that crashed. Running
+  one of those stale binaries by hand reports a crash from the *old* code:
+
+```
+error: 'vectors.test.vectors: frozen byte contract' terminated with signal ABRT with stderr:
+       Segmentation fault at address 0x16fa58000
+       src/core/view.zig:120:49: 0x10053b36f in render (test)
+                           written += (std.fmt.bufPrint(line_buf[written..], "[{s}]", .{tag}) ...);
+```
+
+  while on disk that `bufPrint` is at line 223 in a different function. The
+  tell: **the quoted source line does not match the file on disk** (line number,
+  function name, or both). The current code is fine; the binary is not current.
+  `zig build test` only ever runs the artifacts it just built, so trust its exit
+  code. To identify the current binaries directly, do a cold rebuild
+  (`rm -rf .zig-cache && zig build test`) — then the `o/*/test` set is exactly
+  the live test targets — or filter by the newest mtimes after a fresh build.
+
 - `std.debug.print("... {s}", .{expr})` does **not** unpack an error union.
   Resolve the value first:
 
@@ -282,3 +322,27 @@ std.debug.print("line: {s}\n", .{line});
 
 - `zig fmt` rewrites files; `zig fmt --check` exits non-zero without writing
   (the CI gate); a build step made with `b.addFmt` rewrites.
+
+## 12. A non-void value must be used
+
+Every expression that yields a value must be bound or explicitly discarded —
+calling a function whose return value you do not need is a compile error
+(C/Go habit; Zig has no implicit statement call):
+
+```
+error: value of type 'u64' ignored
+    try journal.appendRecord(allocator, .entry, 0, "first day", &.{}, ts, tz, false);
+note: all non-void values must be used
+note: to discard the value, assign it to '_'
+```
+
+```zig
+// preferred — discard explicitly
+_ = try journal.appendRecord(allocator, .entry, 0, "first day", &.{}, ts, tz, false);
+
+// or bind it when the value is useful (appendRecord returns the new seq)
+const seq = try journal.appendRecord(allocator, .entry, 0, "first day", &.{}, ts, tz, false);
+```
+
+- It bites most in tests, where the habit is to `try` a builder call purely for
+  its side effects.
