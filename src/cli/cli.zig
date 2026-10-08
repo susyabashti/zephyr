@@ -3,6 +3,7 @@
 //!     zephyr edit <seq> [-t TAG]... <text>  |  zephyr rm <seq>
 //!     zephyr redact <seq> [--yes]  |  zephyr checkpoint [--key PATH]
 //!     zephyr export --for-ai [YYYY-MM-DD[:YYYY-MM-DD]]
+//!     zephyr ots-stamp <segment> --proof <path>  |  zephyr ots-export <segment> [--out <path>]
 //!
 //! Exit codes: 0 ok, 1 integrity or journal error, 2 usage error.
 
@@ -23,11 +24,15 @@ pub const RunError = error{
     TargetNotFound,
     TargetNotEntry,
     BadKeyFile,
+    BadOtsProof,
+    SegmentNotSealed,
 } || core.anchor.SignError || core.journal.OpenError || core.journal.Journal.AppendError ||
     core.journal.Journal.VerifyError || core.journal.Journal.RedactError ||
     core.journal.Journal.CheckAnchorsError || core.journal.Journal.WriteAnchorError ||
+    core.journal.Journal.CheckOtsAnchorsError || core.journal.Journal.OtsCheckFailure ||
+    core.ots.VerifyError ||
     core.view.RenderError || File.OpenError || File.Writer.Error || std.Io.Reader.ShortError ||
-    std.crypto.errors.IdentityElementError;
+    std.crypto.errors.IdentityElementError || std.process.CurrentPathError;
 
 pub fn run(init: std.process.Init, args: []const []const u8) RunError!void {
     const io = init.io;
@@ -90,6 +95,10 @@ pub fn run(init: std.process.Init, args: []const []const u8) RunError!void {
             try runRedact(arena, io, err_file, out, init.environ_map, path, rest);
         } else if (std.mem.eql(u8, command, "checkpoint")) {
             try runCheckpoint(arena, io, err_file, out, init.environ_map, path, rest);
+        } else if (std.mem.eql(u8, command, "ots-stamp")) {
+            try runOtsStamp(arena, io, err_file, out, init.environ_map, path, rest);
+        } else if (std.mem.eql(u8, command, "ots-export")) {
+            try runOtsExport(arena, io, err_file, out, init.environ_map, path, rest);
         } else {
             unreachable;
         }
@@ -106,7 +115,8 @@ fn isCommand(s: []const u8) bool {
         std.mem.eql(u8, s, "week") or std.mem.eql(u8, s, "on") or
         std.mem.eql(u8, s, "search") or std.mem.eql(u8, s, "edit") or
         std.mem.eql(u8, s, "rm") or std.mem.eql(u8, s, "redact") or
-        std.mem.eql(u8, s, "checkpoint") or std.mem.eql(u8, s, "export");
+        std.mem.eql(u8, s, "checkpoint") or std.mem.eql(u8, s, "export") or
+        std.mem.eql(u8, s, "ots-stamp") or std.mem.eql(u8, s, "ots-export");
 }
 
 // ---------------------------------------------------------------- log
@@ -355,7 +365,7 @@ fn confirmRedact(arena: Allocator, io: Io, out: File, target: u64) RunError!bool
     const prompt_fmt =
         \\redact seq {d}? the entry's text and tags are removed from the file; the
         \\record header and hash chain are kept, so the redaction itself is visible.
-        \\Proceed? [y/N] 
+        \\\Proceed? [y/N]
     ;
     const prompt = try arena.print(prompt_fmt, .{target});
     try File.writeStreamingAll(out, io, prompt);
@@ -559,6 +569,22 @@ fn runVerify(
                 head_hex,
             }));
         }
+
+        // The OTS anchor check (spec/ots-anchor.md section 6.1) runs on a
+        // journal that passed verify: every stored proof must still bind to
+        // its segment's footer head, or the journal must not be trusted.
+        const ots_results = try journal.checkOtsAnchors(arena);
+        for (ots_results) |check| {
+            if (!check.ok) {
+                const reason = otsCheckFailureReason(check.failure.?);
+                try printLine(err_file, io, try arena.print("FAIL: ots anchors/{s}: {s}", .{ check.file_name, reason }));
+                return error.VerifyFailed;
+            }
+            try printLine(out, io, try arena.print("ots: ok ({s}, {s})", .{
+                check.file_name,
+                try attestationSummary(arena, check.attestations),
+            }));
+        }
     } else {
         try reportIssue(err_file, io, arena, result.issue.?);
         return error.VerifyFailed;
@@ -577,6 +603,214 @@ fn anchorFailureReason(failure: core.journal.Journal.CheckAnchorsFailure) []cons
         error.NonCanonicalKey => "artifact public key is not a valid Ed25519 point",
         error.SignatureVerificationFailed => "artifact signature verification failed (artifact or key corrupted)",
     };
+}
+
+fn otsCheckFailureReason(failure: core.journal.Journal.OtsCheckFailure) []const u8 {
+    return switch (failure) {
+        error.SegmentMissing => "the referenced segment is missing (the journal was truncated)",
+        error.SegmentNotSealed => "the referenced segment is not sealed",
+        else => |err| otsFailureReason(err),
+    };
+}
+
+fn otsFailureReason(err: core.ots.VerifyError) []const u8 {
+    return switch (err) {
+        error.TooLarge => "proof exceeds the 1 MiB limit",
+        error.Truncated => "proof is truncated",
+        error.TrailingGarbage => "trailing garbage after the proof tree",
+        error.BadMagic => "bad magic (not an OpenTimestamps v1 detached proof)",
+        error.BadVersion => "unsupported proof version",
+        error.BadHashOp => "unsupported file hash op (expected sha256)",
+        error.DigestMismatch => "proof does not commit to this segment's footer head (the segment changed after stamping, or the proof is for another segment)",
+        error.UnknownOp => "unknown op in the proof tree",
+        error.OpArgEmpty => "empty op argument in the proof",
+        error.OpArgTooLong => "op argument exceeds 4096 bytes",
+        error.MsgTooLong => "op applied to a message exceeding 4096 bytes",
+        error.ResultTooLong => "op result exceeds 4096 bytes",
+        error.RecursionLimit => "proof tree deeper than 256",
+        error.AttestationPayloadTooLong => "attestation payload exceeds 8192 bytes",
+        error.BadAttestation => "malformed attestation payload",
+        error.BadUri => "malformed pending attestation URI",
+        error.VaruintTooLong => "malformed varint in the proof",
+    };
+}
+
+/// A short human summary of a proof's attestations, for the stamp/verify
+/// output lines.
+fn attestationSummary(allocator: Allocator, hits: []const core.ots.AttestationHit) Allocator.Error![]const u8 {
+    if (hits.len == 0) return "no attestations";
+    var parts = std.ArrayList([]const u8).empty;
+    errdefer parts.deinit(allocator);
+    for (hits) |hit| {
+        switch (hit.attestation) {
+            .bitcoin => |h| try parts.append(allocator, try allocator.print("bitcoin height {d}", .{h})),
+            .litecoin => |h| try parts.append(allocator, try allocator.print("litecoin height {d}", .{h})),
+            .pending => |uri| try parts.append(allocator, try allocator.print("pending calendar {s}", .{uri})),
+            .unknown => try parts.append(allocator, "unknown attestation"),
+        }
+    }
+    if (parts.items.len == 1) return try allocator.print("attested at {s}", .{parts.items[0]});
+    return try std.mem.join(allocator, ", ", parts.items);
+}
+
+/// Reads the proof file at `path` (relative paths resolve against the
+/// current directory). A missing file prints a message and becomes
+/// TargetNotFound.
+const ReadProofError = Allocator.Error || Dir.OpenError || Dir.ReadFileAllocError ||
+    std.process.CurrentPathError || error{TargetNotFound};
+
+fn readProofFile(allocator: Allocator, io: Io, err_file: File, path: []const u8) ReadProofError![]u8 {
+    const abs = if (std.Io.Dir.path.isAbsolute(path))
+        path
+    else blk: {
+        const cwd = try std.process.currentPathAlloc(io, allocator);
+        break :blk try allocator.print("{s}/{s}", .{ cwd, path });
+    };
+    const d = if (std.fs.path.dirname(abs)) |parent|
+        try Dir.openDirAbsolute(io, parent, .{})
+    else
+        Dir.cwd();
+    defer Dir.close(d, io);
+    return Dir.readFileAlloc(d, io, std.fs.path.basename(abs), allocator, .unlimited) catch |err| switch (err) {
+        error.FileNotFound => {
+            printLine(err_file, io, try allocator.print("no such file: {s}", .{path})) catch return error.InputOutput;
+            return error.TargetNotFound;
+        },
+        else => return err,
+    };
+}
+
+// ------------------------------------------------------------- ots-stamp
+
+fn runOtsStamp(
+    arena: Allocator,
+    io: Io,
+    err_file: File,
+    out: File,
+    environ_map: *const std.process.Environ.Map,
+    path: []const u8,
+    rest: []const []const u8,
+) RunError!void {
+    var segment_name: ?[]const u8 = null;
+    var proof_path: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        const arg = rest[i];
+        if (std.mem.eql(u8, arg, "--proof")) {
+            i += 1;
+            if (i >= rest.len) return error.Usage;
+            if (proof_path != null) return error.Usage;
+            proof_path = rest[i];
+        } else if (segment_name != null or std.mem.startsWith(u8, arg, "-")) {
+            return error.Usage;
+        } else {
+            segment_name = arg;
+        }
+    }
+    const seg_name = segment_name orelse return error.Usage;
+    const proof_file = proof_path orelse return error.Usage;
+    if (!core.journal.isSegmentName(seg_name)) {
+        try printLine(err_file, io, try arena.print("no such segment: {s}", .{seg_name}));
+        return error.TargetNotFound;
+    }
+
+    const journal = try openReadJournal(arena, io, err_file, environ_map, path);
+    defer journal.close();
+    _ = try verifyOrReport(arena, io, err_file, &journal);
+
+    const seg_bytes = try journal.readSegment(arena, seg_name);
+    const head = core.segment.footerHead(seg_bytes) catch |err| switch (err) {
+        error.NotSealed => {
+            try printLine(err_file, io, try arena.print("segment {s} is not sealed; only sealed segments can be stamped", .{seg_name}));
+            return error.SegmentNotSealed;
+        },
+        else => |e| return e,
+    };
+    var expected: [32]u8 = undefined;
+    core.records.Sha256.hash(&head, &expected, .{});
+
+    const proof = try readProofFile(arena, io, err_file, proof_file);
+    const verification = core.ots.verify(arena, proof, &expected) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => |e| {
+            try printLine(err_file, io, try arena.print("ots-stamp: proof verification failed: {s}", .{otsFailureReason(e)}));
+            return error.BadOtsProof;
+        },
+    };
+
+    const month = seg_name[0..7];
+    try journal.writeOtsAnchorFile(arena, month, proof);
+    try printLine(out, io, try arena.print(
+        "ots-stamp: ok (anchors/ots-{s}.ots, {s})",
+        .{ month, try attestationSummary(arena, verification.attestations) },
+    ));
+}
+
+// ------------------------------------------------------------- ots-export
+
+fn runOtsExport(
+    arena: Allocator,
+    io: Io,
+    err_file: File,
+    out: File,
+    environ_map: *const std.process.Environ.Map,
+    path: []const u8,
+    rest: []const []const u8,
+) RunError!void {
+    var segment_name: ?[]const u8 = null;
+    var out_path: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        const arg = rest[i];
+        if (std.mem.eql(u8, arg, "--out")) {
+            i += 1;
+            if (i >= rest.len) return error.Usage;
+            if (out_path != null) return error.Usage;
+            out_path = rest[i];
+        } else if (segment_name != null or std.mem.startsWith(u8, arg, "-")) {
+            return error.Usage;
+        } else {
+            segment_name = arg;
+        }
+    }
+    const seg_name = segment_name orelse return error.Usage;
+    if (!core.journal.isSegmentName(seg_name)) {
+        try printLine(err_file, io, try arena.print("no such segment: {s}", .{seg_name}));
+        return error.TargetNotFound;
+    }
+
+    const journal = try openReadJournal(arena, io, err_file, environ_map, path);
+    defer journal.close();
+    _ = try verifyOrReport(arena, io, err_file, &journal);
+
+    const seg_bytes = try journal.readSegment(arena, seg_name);
+    const head = core.segment.footerHead(seg_bytes) catch |err| switch (err) {
+        error.NotSealed => {
+            try printLine(err_file, io, try arena.print("segment {s} is not sealed; only sealed segments can be stamped", .{seg_name}));
+            return error.SegmentNotSealed;
+        },
+        else => |e| return e,
+    };
+
+    const target = out_path orelse blk: {
+        const cwd = try std.process.currentPathAlloc(io, arena);
+        break :blk try arena.print("{s}/{s}.head", .{ cwd, seg_name });
+    };
+    const display = out_path orelse target;
+    const d = if (std.fs.path.dirname(target)) |parent|
+        try Dir.openDirAbsolute(io, parent, .{})
+    else
+        Dir.cwd();
+    defer Dir.close(d, io);
+    const f = Dir.createFile(d, io, std.fs.path.basename(target), .{}) catch |err| switch (err) {
+        else => return err,
+    };
+    defer File.close(f, io);
+    try File.writeStreamingAll(f, io, &head);
+    try printLine(out, io, try arena.print(
+        "ots-export: wrote {s} (head {s}); anchor this file to get an .ots proof",
+        .{ display, try hexOf(arena, &head) },
+    ));
 }
 
 // ---------------------------------------------------------------- helpers
@@ -729,8 +963,15 @@ fn printUsage(file: File, io: Io) File.Writer.Error!void {
         \\                                   file (headers and chain are kept)
         \\  zephyr checkpoint [--key PATH]    sign the journal state into an anchor
         \\                                   artifact (anchors/checkpoint-<seq>.zpa)
+        \\  zephyr ots-stamp <segment> --proof <path>
+        \\                                   attach a standard OpenTimestamps
+        \\                                   proof of a sealed segment's footer
+        \\                                   head (anchors/ots-<YYYY-MM>.ots)
+        \\  zephyr ots-export <segment> [--out <path>]
+        \\                                   write the segment's 32-byte footer
+        \\                                   head for external OTS tooling
         \\  zephyr verify                     full integrity check (plus the
-        \\                                   anchor check, when anchors exist)
+        \\                                   anchor checks, when anchors exist)
         \\  zephyr export --for-ai [range]   LLM view of the log (refuses a
         \\                                   failing log); range: YYYY-MM-DD or
         \\                                   YYYY-MM-DD:YYYY-MM-DD

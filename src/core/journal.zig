@@ -12,6 +12,7 @@ const std = @import("std");
 const records = @import("records.zig");
 const segment = @import("segment.zig");
 const anchor = @import("anchor.zig");
+const ots = @import("ots.zig");
 const timezone = @import("timezone.zig");
 
 const Io = std.Io;
@@ -411,6 +412,108 @@ pub const Journal = struct {
         try segment.writeAtomic(self.dir, self.io, name, bytes);
     }
 
+    /// Writes an OTS proof to `<journal>/anchors/ots-<YYYY-MM>.ots` (spec/ots-
+    /// anchor.md section 5); the anchors directory is created if needed.
+    pub fn writeOtsAnchorFile(self: *const Journal, allocator: Allocator, month: []const u8, bytes: []const u8) WriteAnchorError!void {
+        try Dir.createDirPath(self.dir, self.io, "anchors");
+        const name = try allocator.print("anchors/ots-{s}.ots", .{month});
+        try segment.writeAtomic(self.dir, self.io, name, bytes);
+    }
+
+    /// The raw bytes of a segment file (spec/ots-anchor.md section 7).
+    pub fn readSegment(self: *const Journal, allocator: Allocator, name: []const u8) Dir.ReadFileAllocError![]u8 {
+        return try Dir.readFileAlloc(self.dir, self.io, name, allocator, .unlimited);
+    }
+
+    /// Every OTS anchor in `<journal>/anchors/` (spec/ots-anchor.md section 5):
+    /// files named `ots-<YYYY-MM>.ots` with a valid month. Each anchor is
+    /// checked against the referenced segment's footer head; anchor failures
+    /// are reported in the results (not as errors) and I/O failures
+    /// propagate. The result, including the pending URIs in the
+    /// attestations, is owned by `allocator`.
+    pub const OtsCheckFailure = ots.VerifyError || error{
+        SegmentMissing,
+        SegmentNotSealed,
+    };
+
+    pub const OtsAnchorCheck = struct {
+        /// The anchor's file name (without the `anchors/` prefix).
+        file_name: []const u8,
+        /// The referenced segment's file name.
+        segment_name: []const u8,
+        ok: bool,
+        failure: ?OtsCheckFailure,
+        /// Valid when `ok`.
+        attestations: []const ots.AttestationHit,
+    };
+
+    pub const CheckOtsAnchorsError = Allocator.Error || Dir.OpenError || Dir.ReadFileAllocError ||
+        Dir.Iterator.Error || segment.FooterHeadError;
+
+    pub fn checkOtsAnchors(self: *const Journal, allocator: Allocator) CheckOtsAnchorsError![]OtsAnchorCheck {
+        const anchors_dir = Dir.openDir(self.dir, self.io, "anchors", .{ .iterate = true }) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => return &.{},
+            else => return err,
+        };
+        defer Dir.close(anchors_dir, self.io);
+
+        var names = std.ArrayList([]const u8).empty;
+        errdefer names.deinit(allocator);
+        var iter = Dir.iterate(anchors_dir);
+        while (try iter.next(self.io)) |entry| {
+            if (entry.kind != .file) continue;
+            if (!isOtsAnchorName(entry.name)) continue;
+            try names.append(allocator, try allocator.dupe(u8, entry.name));
+        }
+        if (names.items.len == 0) return &.{};
+        std.mem.sort([]const u8, names.items, {}, segmentNameLessThan);
+
+        var results = std.ArrayList(OtsAnchorCheck).empty;
+        errdefer results.deinit(allocator);
+        for (names.items) |name| {
+            const segment_name = try allocator.print("{s}.zph", .{name[4..11]});
+            var check = OtsAnchorCheck{
+                .file_name = name,
+                .segment_name = segment_name,
+                .ok = false,
+                .failure = null,
+                .attestations = &.{},
+            };
+            const proof = try Dir.readFileAlloc(anchors_dir, self.io, name, allocator, .unlimited);
+            const seg_bytes = Dir.readFileAlloc(self.dir, self.io, segment_name, allocator, .unlimited) catch |err| {
+                allocator.free(proof);
+                check.failure = if (err == error.FileNotFound) error.SegmentMissing else return err;
+                try results.append(allocator, check);
+                continue;
+            };
+            const head = segment.footerHead(seg_bytes) catch |err| {
+                allocator.free(seg_bytes);
+                allocator.free(proof);
+                check.failure = if (err == error.NotSealed) error.SegmentNotSealed else return err;
+                try results.append(allocator, check);
+                continue;
+            };
+            var expected: [32]u8 = undefined;
+            records.Sha256.hash(&head, &expected, .{});
+            const verification = ots.verify(allocator, proof, &expected) catch |err| {
+                allocator.free(seg_bytes);
+                allocator.free(proof);
+                switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => |e| check.failure = e,
+                }
+                try results.append(allocator, check);
+                continue;
+            };
+            allocator.free(seg_bytes);
+            allocator.free(proof);
+            check.ok = true;
+            check.attestations = verification.attestations;
+            try results.append(allocator, check);
+        }
+        return try results.toOwnedSlice(allocator);
+    }
+
     fn readFileBytes(self: *const Journal, allocator: Allocator, name: []const u8) Dir.ReadFileAllocError![]u8 {
         return try Dir.readFileAlloc(self.dir, self.io, name, allocator, .unlimited);
     }
@@ -691,7 +794,8 @@ fn segmentMonthName(allocator: Allocator, ts_ms: u64) Allocator.Error![]const u8
     return allocator.print("{d:0>4}-{d:0>2}.zph", .{ year_day.year, month_day.month.numeric() });
 }
 
-fn isSegmentName(name: []const u8) bool {
+/// Whether `name` is a well-formed segment file name `<YYYY>-<MM>.zph`.
+pub fn isSegmentName(name: []const u8) bool {
     if (name.len != 11) return false;
     if (name[4] != '-' or name[7] != '.') return false;
     if (!std.mem.eql(u8, name[8..11], "zph")) return false;
@@ -703,6 +807,18 @@ fn isSegmentName(name: []const u8) bool {
     }
     const month = std.fmt.parseInt(u32, name[5..7], 10) catch return false;
     return month >= 1 and month <= 12;
+}
+
+/// Whether `name` is a well-formed OTS anchor name `ots-<YYYY-MM>.ots`
+/// (spec/ots-anchor.md section 5).
+fn isOtsAnchorName(name: []const u8) bool {
+    if (name.len != 15) return false;
+    if (!std.mem.startsWith(u8, name, "ots-")) return false;
+    if (!std.mem.endsWith(u8, name, ".ots")) return false;
+    var full: [11]u8 = undefined;
+    @memcpy(full[0..7], name[4..11]);
+    @memcpy(full[7..11], ".zph");
+    return isSegmentName(&full);
 }
 
 fn segmentNameLessThan(_: void, a: []const u8, b: []const u8) bool {

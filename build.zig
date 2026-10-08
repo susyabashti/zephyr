@@ -35,6 +35,7 @@ pub fn build(b: *std.Build) void {
     const options = b.addOptions();
     options.addOptionPath("vectors", b.path("spec/vectors/journals.json"));
     options.addOptionPath("anchors", b.path("spec/vectors/anchors.json"));
+    options.addOptionPath("ots_vectors", b.path("spec/vectors/ots.json"));
     const vector_module = b.createModule(.{
         .root_source_file = b.path("test/vectors.zig"),
         .target = target,
@@ -107,6 +108,29 @@ pub fn build(b: *std.Build) void {
     const phase5_tests = b.addTest(.{ .root_module = phase5_module });
     const run_phase5_tests = b.addRunArtifact(phase5_tests);
 
+    // Phase 5b: OpenTimestamps proof format (pinned vectors + corruption
+    // suite), and the stamp/verify/redaction gates on an on-disk journal.
+    const ots_module = b.createModule(.{
+        .root_source_file = b.path("test/ots.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "zephyr_core", .module = core },
+            .{ .name = "std_options", .module = options.createModule() },
+        },
+    });
+    const ots_tests = b.addTest(.{ .root_module = ots_module });
+    const run_ots_tests = b.addRunArtifact(ots_tests);
+
+    const phase5b_module = b.createModule(.{
+        .root_source_file = b.path("test/phase5b.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "zephyr_core", .module = core },
+        },
+    });
+    const phase5b_tests = b.addTest(.{ .root_module = phase5b_module });
+    const run_phase5b_tests = b.addRunArtifact(phase5b_tests);
+
     const roundtrip_module = b.createModule(.{
         .root_source_file = b.path("test/roundtrip.zig"),
         .target = target,
@@ -144,6 +168,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_phase4_tests.step);
     test_step.dependOn(&run_anchors_tests.step);
     test_step.dependOn(&run_phase5_tests.step);
+    test_step.dependOn(&run_ots_tests.step);
+    test_step.dependOn(&run_phase5b_tests.step);
 
     const fmt_step = b.step("fmt", "Run format checks");
     fmt_step.dependOn(&b.addFmt(.{ .paths = b.pathList(&.{ "src", "test", "build.zig" }) }).step);

@@ -123,6 +123,20 @@ pub fn summary(bytes: []const u8) SummaryError!Summary {
     return .{ .start_seq = start_seq, .record_count = record_count, .sealed = sealed, .head = head };
 }
 
+/// The 32-byte committed head of a sealed segment's footer (spec/ots-
+/// anchor.md section 2). The file must pass `summary` and be sealed; the
+/// footer's own hash check belongs to verify.
+pub const FooterHeadError = SummaryError || error{NotSealed};
+
+pub fn footerHead(bytes: []const u8) FooterHeadError![records.DigestLen]u8 {
+    const sum = try summary(bytes);
+    if (!sum.sealed) return error.NotSealed;
+    const f = bytes.len - FooterLen;
+    var head: [records.DigestLen]u8 = undefined;
+    @memcpy(&head, bytes[f + 24 .. f + 56]);
+    return head;
+}
+
 /// Structural parse only: magic, version, region sizes, per-record header
 /// decode, payload slicing, footer fields. No chain, commitment, or footer
 /// hash checks — those belong to verify (spec section 8).

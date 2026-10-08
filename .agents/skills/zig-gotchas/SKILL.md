@@ -1,22 +1,18 @@
 ---
 name: zig-gotchas
 description: >
-  Zig language gotchas — version-independent pitfalls of current Zig, each verified
-  by compiling a failing probe. Covers: test discovery is
-  root-file only (silent "All 0 tests passed"), multi-line string `\\` continuation
-  rules, if/else statements require block branches, for loops yield values not
-  pointers, `@as` is not an integer cast, `@intCast` needs a known result type, slices
-  of stack-local arrays dangle (segfault far from the cause), error-set algebra
-  (superset rule, exhaustive switches break far away, named `<FnName>Error` sets),
-  padded signed fmt prints `+`, `zig build test` is silent on success, stale
-  `.zig-cache` test binaries fake crashes from old revisions, `std.json` `?T`
-  fields must be present, `comptime assert` is not a statement, discarding a
-  non-void value needs `_ =`. Use when writing or debugging Zig code, when tests
-  mysteriously do not run, when a segfault has no obvious cause, when a crash
-  trace's line numbers do not match the source on disk, on "error set" compile
-  errors, or when multi-line string, fmt, or JSON parsing misbehaves. Companion to
-  zig-api (version-specific APIs) and zig-tiger-style (style) — this skill covers
-  neither.
+  Version-independent Zig gotchas, each verified by compiling a failing probe:
+  test discovery is root-file only, multi-line string rules, dangling
+  stack-local slices, error-set algebra (narrowing, exhaustive switches, orelse
+  on Error!?T), integer cast and shift rules, @memcpy length checks, padded
+  signed fmt, std.json ?T fields, comptime blocks, and zig build test quirks
+  (silent success, stale .zig-cache binaries faking crashes, spurious "failed
+  command" from passing tests that print to stderr). Use when writing or
+  debugging Zig, when tests mysteriously do not run, when a segfault or crash
+  trace doesn't match the source on disk, on "error set" compile errors, when
+  zig build test reports a failure but exits 0, or when string, fmt, or JSON
+  parsing misbehaves. Companion to zig-api (version-specific APIs) and
+  zig-tiger-style (style).
 metadata:
   language: "zig"
   category: "programming-language"
@@ -214,6 +210,12 @@ const minutes: i16 = @intCast(raw);
 const minute_hi: u8 = @as(u8, @intCast(raw));
 ```
 
+- **The runtime shift amount of `<<`/`>>` must be `u6`.** A counter of any other
+  width fails with `error: expected type 'u6', found 'u8'`. Keep the counter a
+  `u6`, and if a bounded loop can increment it past 63 (a LEB128 decoder with a
+  10-byte cap hits shifts `0, 7, …, 63` and then wants one more increment),
+  reject the input *before* the increment instead of widening the counter.
+
 ## 6. Slices of stack-local arrays dangle
 
 Returning a slice of a local fixed array hands out a pointer into the current
@@ -248,6 +250,11 @@ pub const Payload = struct {
 - Every caller must free (including validate-only callers that discard the
   result), and tests using the safe test allocator will fail the whole run on a
   leaked header array.
+- `@memcpy(dst, src)` requires `dst.len == src.len` **exactly** — a debug build
+  panics with `source and destination arguments have non-equal lengths`. The
+  usual mistake is copying into a rest-of-buffer tail, `@memcpy(out[w..],
+  data)`, where `out` is longer than `w + data.len`. Size the tail explicitly:
+  `@memcpy(out[w .. w + data.len], data)`.
 
 ## 7. Error-set algebra
 
@@ -273,6 +280,24 @@ pub const VerifyError = Allocator.Error || Dir.ReadFileAllocError ||
 - In tests, free **auxiliary** allocations too (slice-header arrays, index
   scratch). The test allocator fails the entire run when the process exits with
   anything still allocated, no matter how small the leak.
+- **`if (err == error.X) return err;` inside a `catch` block does not narrow
+  `err`.** After the early return, `err` is still the full union, so the next
+  use (passing it to a narrower parameter) fails to compile. To split one error
+  out of the set — typically `OutOfMemory` from a domain set — use a `switch`:
+
+```zig
+const verification = ots.verify(allocator, proof, digest) catch |err| switch (err) {
+    error.OutOfMemory => return error.OutOfMemory,
+    else => |e| handleDomainError(e), // e: the set minus OutOfMemory
+};
+```
+
+  **The `else => |e|` capture is narrowed to the remaining set** (verified
+  against the project toolchain); this is the idiom instead of `@errorCast`.
+- **`orelse` requires a true optional.** It does not accept an error union with
+  an optional payload (`E!?T`): `error: expected optional type, found
+  'error{…}?[]const u8'`. Use `catch`:
+  `const magic = r.readBytes(31) catch return error.Truncated;`
 
 ## 8. Fixed-width formatting
 
@@ -364,6 +389,16 @@ std.debug.print("line: {s}\n", .{line});
   Drop the `--listen=-` flag (and `--seed` if you want a stable order) to run the
   binary directly; the `failed command:` line in the build output is the build
   system's own invocation, not a shell command to reuse.
+
+- **(0.17.0) A *successful* test step that wrote to stderr can print a red
+  `failed command:` line — and the build still exits 0.** The build renders its
+  error/warning messages whenever a step has any stderr, *no matter the
+  result*, and the zig-test run path leaves the failed-command string set even
+  on success. Any test that prints on success (a metrics block via
+  `std.debug.print`) triggers this on a cold run; a warm run re-caches the step
+  and the line never appears, which makes it look like a flake. Trust the exit
+  code and `zig build test --summary all` (a genuinely failed step is never
+  cached); do not "fix" the passing test.
 
 ## 12. A non-void value must be used
 

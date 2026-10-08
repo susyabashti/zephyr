@@ -268,8 +268,29 @@ Every phase has a deliverable and a pass/fail gate. Do not start the next phase 
 - The anchor artifact format is frozen in `spec/anchor-format.md` (190-byte `ZPA1` artifact: Ed25519 public key, `head ‖ count ‖ timestamp_ms` signed state, trailing SHA-256 over the first 158 bytes). Vectors in `spec/vectors/anchors.json` (RFC 8032 known-answer pairs plus pinned full artifacts) are re-derived by both implementations: `test/anchors.zig` (`std.crypto` Ed25519) and `test/reference.py` (pure-Python Ed25519 per RFC 8032 §6 in `test/ed25519.py`).
 - `zephyr redact <seq> [--yes]` removes the entry's payload (and its amendments') from disk while the 125-byte header blocks stay byte-identical; `zephyr checkpoint [--key PATH]` appends a checkpoint record and writes the signed artifact to `<journal>/anchors/checkpoint-<seq>.zpa` (key: `--key PATH` > `$ZEPHYR_KEY` > `<journal>/zephyr-key`, auto-created 0600); `verify` runs the anchor check when anchors exist and fails the journal otherwise.
 - Gates passed: tail truncation and a same-shape full rewrite are caught by the anchor check (`test/phase5.zig`); redaction leaves the content and salt off disk while `verify` passes and reports the entry redacted; signatures verify from spec and vectors alone.
-- **Anchor 2 (OpenTimestamps on sealed segment heads) is deferred to Phase 5b** — the git/second-device anchor is the trust source for now (the last Phase 5 gate, "a timestamp proof verifies independently of Zephyr", belongs there).
+- **Anchor 2 (OpenTimestamps on sealed segment heads) is done in Phase 5b** (see below); with it, the last Phase 5 gate — "a timestamp proof verifies independently of Zephyr" — closes.
 - Merkle roots / single-entry proofs: not done (optional).
+
+### Phase 5b — OpenTimestamps anchoring
+
+**Deliverables**
+
+- `spec/ots-anchor.md`: the frozen `.ots` format — standard OpenTimestamps v1 detached timestamp proofs, with the stamped document being a sealed segment's `footer_head` (`file_digest = SHA-256(footer_head)`), so redaction of a sealed segment leaves every timestamp valid.
+- `src/core/ots.zig`: a pure proof verifier (structure, digest binding, attestations; no block-data trust — that stays with standard OpenTimestamps tooling).
+- `zephyr ots-export <segment> [--out PATH]`: writes the 32-byte stamped `footer_head` for external timestamping.
+- `zephyr ots-stamp <segment> --proof PATH`: verifies a proof against the segment's stamped digest and stores it as `<journal>/anchors/ots-<YYYY-MM>.ots`.
+- `verify` checks every `anchors/ots-*.ots` file and fails the journal on any mismatch.
+
+**Gate**
+
+- A timestamp proof verifies independently of Zephyr: the pinned vectors (real mainnet block 586, plus a synthetic OP_RETURN block) pass in both implementations, and each leaf attestation message is the block's merkle root.
+- A rewritten month is caught by the ots anchor check; an anchor for a missing segment is reported; redaction of a sealed month keeps its anchor valid.
+
+**Status (implemented)**
+
+- Vectors in `spec/vectors/ots.json` are checked by `test/ots.zig` (pinned vectors, corruption suite, format edge cases) and by `test/otsref.py` (a pure-Python OpenTimestamps verifier and legacy Bitcoin block parser, cross-checked against the upstream `opentimestamps` Python package); `test/reference.py --check` folds the OTS vectors into the reference gate.
+- `test/phase5b.zig` covers the on-disk gates: a synthetic proof over a sealed month's stamped digest verifies through `checkOtsAnchors`, redacting an entry in the sealed month keeps the footer (and the anchor) byte-identical, a same-shape rewrite of the month fails the check with `DigestMismatch`, and an anchor whose segment is missing is `SegmentMissing`.
+- Proofs are verified with the digest of the segment's `footer_head`; attestation authenticity (that a claimed bitcoin block really commits the attested root) is deliberately left to standard OpenTimestamps tooling, per the spec.
 
 ### Phase 6 — AI access (MCP)
 

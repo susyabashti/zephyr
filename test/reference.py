@@ -8,6 +8,10 @@ the Zig implementation in src/: the gate is that two implementations
 working only from the spec produce byte-identical files, hashes, and
 anchor artifacts for the shared vectors in spec/vectors/.
 
+spec/ots-anchor.md is covered by test/otsref.py, a pure-Python
+OpenTimestamps v1 proof verifier and legacy Bitcoin block parser, which
+validates the OTS vectors in spec/vectors/ots.json.
+
 Usage:
   python3 test/reference.py --gen    fill the expect.* fields in the vectors file
   python3 test/reference.py --check  validate the vectors files end to end
@@ -22,6 +26,7 @@ import unicodedata
 from datetime import date, timedelta
 
 import ed25519
+import otsref
 
 EPOCH = date(1970, 1, 1)
 
@@ -635,13 +640,15 @@ def main():
             problems += check_journal(journal, strict=True)
         anchor_problems, n_anchors = check_anchors()
         problems += anchor_problems
+        ots_problems, n_ots, n_ots_corr = otsref.check_ots()
+        problems += ots_problems
         if problems:
             for p in problems:
                 print("FAIL:", p, file=sys.stderr)
             sys.exit(1)
         n_corruptions = sum(len(j.get("corruptions", [])) for j in data["journals"])
         print(f"ok: {len(data['journals'])} journal(s), {n_corruptions} corruption(s), "
-              f"{n_anchors} anchor vector(s) all verified")
+              f"{n_anchors} anchor vector(s), {n_ots} OTS vector(s) ({n_ots_corr} OTS corruption checks) all verified")
 
 
 if __name__ == "__main__":
