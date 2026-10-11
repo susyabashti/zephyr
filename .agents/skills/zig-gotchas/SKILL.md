@@ -5,9 +5,11 @@ description: >
   test discovery is root-file only, multi-line string rules, dangling
   stack-local slices, error-set algebra (narrowing, exhaustive switches, orelse
   on Error!?T), integer cast and shift rules, @memcpy length checks, padded
-  signed fmt, std.json ?T fields, comptime blocks, and zig build test quirks
-  (silent success, stale .zig-cache binaries faking crashes, spurious "failed
-  command" from passing tests that print to stderr). Use when writing or
+  signed fmt, std.json ?T fields, std.Io writer buffering and manual flush,
+  catch payload forms, removed std.math.min and array fill-init, comptime
+  blocks, and zig build test quirks (silent success, stale .zig-cache binaries
+  faking crashes, spurious "failed command" from passing tests that print to
+  stderr). Use when writing or
   debugging Zig, when tests mysteriously do not run, when a segfault or crash
   trace doesn't match the source on disk, on "error set" compile errors, when
   zig build test reports a failure but exits 0, or when string, fmt, or JSON
@@ -332,8 +334,11 @@ comptime {
 
 ## 10. `std.json` (current behavior)
 
-- An optional (`?T`) struct field **must be present** in the JSON.
-  `"field": null` parses to null; an omitted field is `error.MissingField`.
+- A struct field omitted from the JSON is `error.MissingField` **unless the
+  field has a default value**, which is then used (0.17: `fillDefaultStructValues`
+  in `std/json/static.zig`). So `b: ?u32 = null` makes omission legal and the
+  value parses to null — the idiomatic shape for optional API arguments — while
+  a bare `b: ?u32` still forces presence. `"field": null` always parses to null.
   Freeze fixtures accordingly — always emit both `null` and real values.
 - `std.json.parseFromSliceLeaky(T, allocator, bytes, .{})` takes the **type
   first**. It is strict about the input (trailing garbage is `error.SyntaxError`)
@@ -483,3 +488,39 @@ while (i < N) : (i += 1) {
   failure is total memory exhaustion, not a leak report.
 - A small loop hides it (a few hundred iterations × hundreds of KB is
   invisible); the same code at 100k iterations dies.
+
+## 15. `std.Io` file writers buffer silently; flush is manual (0.17)
+
+`Io.File.writerStreaming(file, io, &buf)` copies writes into the caller's
+buffer; nothing reaches the fd until the buffer is full or you flush — and
+there is **no flush on process exit**. A program that writes one short line
+and exits prints **nothing** (verified: empty output, exit 0). An interactive
+protocol over stdio needs an explicit `try Io.File.Writer.flush(&writer)`
+after every response, or the peer hangs until the buffer fills.
+
+- `writeAll` is a method of `Io.Writer`, not `Io.File.Writer`:
+  `error: no field or member function named 'writeAll' in 'Io.File.Writer'`.
+  Bridge with `writer.interface.writeAll(...)`; flush with
+  `Io.File.Writer.flush(&writer)` (note the different receiver).
+- "Streaming" describes the file mode, not the buffering: writes are still
+  buffered in `&buf`; the mode only means the data is not read back from the
+  file.
+
+## 16. Muscle-memory one-liners that no longer compile (0.17)
+
+- `std.math.min(a, b)` — `error: root source file struct 'math' has no member
+  named 'min'`. Use the builtin `@min(a, b)`.
+- Fill-init `[16]u8{0}` — `error: expected 16 array elements; found 1`.
+  Use `std.mem.zeroes([16]u8)`.
+
+## 17. `catch` has no `else` form, and the handler must return the value type
+
+`expr catch else handler` does not parse in 0.17:
+`error: expected expression, found 'else'`. The only forms are
+`expr catch handler` and `expr catch |e| handler`; both run **only on the
+error path** and the success value passes through untouched. The handler must
+evaluate to the success value's type or diverge:
+`fail() catch |err| @errorName(err)` is
+`error: incompatible types: 'u32' and '[:0]const u8'`. To inspect the error,
+use `try std.testing.expectError(error.Bang, fail())` in tests, or let the
+error propagate to a scope that can branch on it.
