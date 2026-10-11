@@ -10,6 +10,15 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    // MCP server (Phase 6): read-only AI access over stdio; depends on core.
+    const mcp = b.addModule("zephyr_mcp", .{
+        .root_source_file = b.path("src/mcp.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "zephyr_core", .module = core },
+        },
+    });
+
     const exe = b.addExecutable(.{
         .name = "zephyr",
         .root_module = b.createModule(.{
@@ -18,6 +27,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "zephyr_core", .module = core },
+                .{ .name = "zephyr_mcp", .module = mcp },
             },
         }),
     });
@@ -108,6 +118,19 @@ pub fn build(b: *std.Build) void {
     const phase5_tests = b.addTest(.{ .root_module = phase5_module });
     const run_phase5_tests = b.addRunArtifact(phase5_tests);
 
+    // Phase 6: MCP server gates (lifecycle, tool behavior, privacy, write
+    // gating, refusal on corruption) driven in-process over in-memory I/O.
+    const phase6_module = b.createModule(.{
+        .root_source_file = b.path("test/phase6.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "zephyr_core", .module = core },
+            .{ .name = "zephyr_mcp", .module = mcp },
+        },
+    });
+    const phase6_tests = b.addTest(.{ .root_module = phase6_module });
+    const run_phase6_tests = b.addRunArtifact(phase6_tests);
+
     // Phase 5b: OpenTimestamps proof format (pinned vectors + corruption
     // suite), and the stamp/verify/redaction gates on an on-disk journal.
     const ots_module = b.createModule(.{
@@ -152,6 +175,8 @@ pub fn build(b: *std.Build) void {
         "src/core/nfc.zig",
         "src/core/timezone.zig",
         "src/core/mark_ranges.zig",
+        // Phase 6: pure wire protocol (self-contained; no core imports).
+        "src/mcp/protocol.zig",
     };
     for (core_test_files) |path| {
         const module = b.createModule(.{
@@ -170,6 +195,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_phase5_tests.step);
     test_step.dependOn(&run_ots_tests.step);
     test_step.dependOn(&run_phase5b_tests.step);
+    test_step.dependOn(&run_phase6_tests.step);
 
     const fmt_step = b.step("fmt", "Run format checks");
     fmt_step.dependOn(&b.addFmt(.{ .paths = b.pathList(&.{ "src", "test", "build.zig" }) }).step);

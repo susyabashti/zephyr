@@ -425,6 +425,12 @@ pub const Journal = struct {
         return try Dir.readFileAlloc(self.dir, self.io, name, allocator, .unlimited);
     }
 
+    /// The raw bytes of a file in the journal directory (spec/mcp.md: the
+    /// profile document). error.FileNotFound when it does not exist.
+    pub fn readJournalFile(self: *const Journal, allocator: Allocator, name: []const u8) Dir.ReadFileAllocError![]u8 {
+        return try Dir.readFileAlloc(self.dir, self.io, name, allocator, .unlimited);
+    }
+
     /// Every OTS anchor in `<journal>/anchors/` (spec/ots-anchor.md section 5):
     /// files named `ots-<YYYY-MM>.ots` with a valid month. Each anchor is
     /// checked against the referenced segment's footer head; anchor failures

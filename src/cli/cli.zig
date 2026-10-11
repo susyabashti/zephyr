@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const core = @import("zephyr_core");
+const mcp = @import("zephyr_mcp");
 
 const Io = std.Io;
 const File = Io.File;
@@ -32,7 +33,7 @@ pub const RunError = error{
     core.journal.Journal.CheckOtsAnchorsError || core.journal.Journal.OtsCheckFailure ||
     core.ots.VerifyError ||
     core.view.RenderError || File.OpenError || File.Writer.Error || std.Io.Reader.ShortError ||
-    std.crypto.errors.IdentityElementError || std.process.CurrentPathError;
+    std.crypto.errors.IdentityElementError || std.process.CurrentPathError || mcp.server.RunError;
 
 pub fn run(init: std.process.Init, args: []const []const u8) RunError!void {
     const io = init.io;
@@ -99,6 +100,8 @@ pub fn run(init: std.process.Init, args: []const []const u8) RunError!void {
             try runOtsStamp(arena, io, err_file, out, init.environ_map, path, rest);
         } else if (std.mem.eql(u8, command, "ots-export")) {
             try runOtsExport(arena, io, err_file, out, init.environ_map, path, rest);
+        } else if (std.mem.eql(u8, command, "mcp")) {
+            try runMcp(arena, io, err_file, init.environ_map, path, rest);
         } else {
             unreachable;
         }
@@ -116,7 +119,8 @@ fn isCommand(s: []const u8) bool {
         std.mem.eql(u8, s, "search") or std.mem.eql(u8, s, "edit") or
         std.mem.eql(u8, s, "rm") or std.mem.eql(u8, s, "redact") or
         std.mem.eql(u8, s, "checkpoint") or std.mem.eql(u8, s, "export") or
-        std.mem.eql(u8, s, "ots-stamp") or std.mem.eql(u8, s, "ots-export");
+        std.mem.eql(u8, s, "ots-stamp") or std.mem.eql(u8, s, "ots-export") or
+        std.mem.eql(u8, s, "mcp");
 }
 
 // ---------------------------------------------------------------- log
@@ -813,6 +817,37 @@ fn runOtsExport(
     ));
 }
 
+// ---------------------------------------------------------------- mcp
+
+/// `zephyr mcp [--allow-write]` — the read-only MCP server (spec/mcp.md).
+/// stdin/stdout are the protocol channel; the journal must exist unless
+/// --allow-write is set (then a fresh journal is created).
+fn runMcp(
+    arena: Allocator,
+    io: Io,
+    err_file: File,
+    environ_map: *const std.process.Environ.Map,
+    path: []const u8,
+    rest: []const []const u8,
+) RunError!void {
+    var allow_write = false;
+    for (rest) |arg| {
+        if (std.mem.eql(u8, arg, "--allow-write")) {
+            allow_write = true;
+        } else {
+            try printUsage(err_file, io);
+            return error.Usage;
+        }
+    }
+    const journal = if (allow_write)
+        try core.journal.Journal.open(arena, io, environ_map, path, true)
+    else
+        try openReadJournal(arena, io, err_file, environ_map, path);
+    defer journal.close();
+    var server = mcp.server.Server.init(&journal, allow_write);
+    return server.run(arena, io);
+}
+
 // ---------------------------------------------------------------- helpers
 
 fn openReadJournal(
@@ -975,6 +1010,9 @@ fn printUsage(file: File, io: Io) File.Writer.Error!void {
         \\  zephyr export --for-ai [range]   LLM view of the log (refuses a
         \\                                   failing log); range: YYYY-MM-DD or
         \\                                   YYYY-MM-DD:YYYY-MM-DD
+        \\  zephyr mcp [--allow-write]      start the read-only MCP (AI) server
+        \\                                   on stdio; --allow-write enables
+        \\                                   the add_entry tool
         \\
         \\Options:
         \\  --journal PATH    journal directory (default: $ZEPHYR_HOME or

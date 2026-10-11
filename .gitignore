@@ -4,6 +4,7 @@ zig-pkg/
 *.o
 .scratch/
 .tmp-journal/
+.tmp-*
 __pycache__/
 
 # General
