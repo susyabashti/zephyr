@@ -45,6 +45,7 @@ Always check local docs or source before searching online.
 | `b.build_root` (Directory) | `b.root` (Cache.Path) | Path representation changed |
 | `if (b.args) \|args\| run.addArgs(args);` | `run.addPassthruArgs()` | Keeps configure cache pure across arg changes |
 | `b.findProgram(...)` | `b.findProgramLazy(...)` | Lazy resolution avoids configure cache poisoning |
+| `switch (u) { .b \|b\| => ... }` (0.16 tag capture) | `.b => ...` field access, or `if (expr) \|v\|` | Switch prong payload captures no longer parse (grammar formalized in 0.17) |
 
 ---
 
@@ -209,6 +210,61 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(exe);
+}
+```
+
+### 9. Switch Prong Payload Captures No Longer Parse
+
+0.17 formally specified and fuzzed the grammar (release notes: "Formally
+Specified and Fuzzed Grammar"), and the switch prong payload capture that
+0.16 added ("union tag captures ... for all prongs") no longer parses:
+
+```zig
+const U = union(enum) { a: u32, b: u64 };
+
+fn f(u: U) u64 {
+    return switch (u) {
+        .a => 0,
+        .b |b| => b, // error: binary operator '|' has whitespace on one side, but not the other
+    };
+}
+```
+
+A capture without a tag (`.b` or the `else` position) fails even earlier:
+`error: expected '}', found '|'`. Use field access (`.b => u.b`) or
+restructure with `if (expr) |v|`.
+
+Related: switching on an optional or an error union is a compile error —
+`error: switch on optional type '?u32'` and
+`error: switch on error union type 'error{boom}!u32'`. Use
+`if (expr) |v| ... else ...`, `orelse`, or `catch |err|` instead.
+
+### 10. `if` on an Error Union Requires Captures on Both Branches
+
+```zig
+const E = error{ boom };
+fn f() E!u32 { ... }
+
+if (f()) |v| {
+    // value path
+} else { // error: expected optional type, found 'error{boom}!u32'
+    // error path
+}
+
+if (f()) { // error: error union payload is ignored
+    // value path
+} else |_| {
+    // error path
+}
+```
+
+Both the `if` and the `else` must carry a capture:
+
+```zig
+if (f()) |v| {
+    // value path
+} else |_| { // or `else |e|` to name the error
+    // error path
 }
 ```
 
@@ -448,6 +504,20 @@ This still links the library by name; it only prevents Zig from invoking
 
 ## Common Idioms in Zig 0.17.0
 
+### `bufPrint` Returns the Written Slice
+
+`std.fmt.bufPrint` returns the slice of the buffer that was **written**, not
+the remaining buffer. To append into a buffer, advance by the returned
+length (verified: `bufPrint(&[16]u8, "hello")` returns the 5-byte slice):
+
+```zig
+var line = std.mem.zeroes([128]u8);
+var written: usize = 0;
+written += (std.fmt.bufPrint(line[written..], "[{s}]", .{tag}) catch unreachable).len;
+written += (std.fmt.bufPrint(line[written..], " {d}", .{n}) catch unreachable).len;
+const rendered = line[0..written];
+```
+
 ### Standard Project Entrypoint (Juicy Main)
 
 ```zig
@@ -508,6 +578,11 @@ test "data processing test" {
 | `error: no member named 'initEmpty' in 'std.bit_set'` | Initializer syntax updated | Use `std.bit_set.Integer.empty` or decl literal `.empty` |
 | `error: 'errdefer' cannot capture error` | `\|err\|` capture syntax removed | Wrap logic into a helper function and use `catch \|err\|` |
 | `error: cannot multiply array types with '**'` | Array multiplication removed | Replace `[1]T{val} ** N` with `@splat(val)` |
+| `error: expected '}', found '\|'` (in a switch) | Prong payload captures no longer parse | Field access `.b => u.b`, or `if (expr) \|v\|` |
+| `error: binary operator '\|' has whitespace on one side...` (in a switch) | Same — `\|payload\|` in a prong is parsed as a binary operator | Same |
+| `error: switch on optional type ...` / `switch on error union type ...` | `switch` does not take optionals or error unions | `if (expr) \|v\|`, `orelse`, or `catch \|err\|` |
+| `error: expected optional type, found 'E!T'` (on an `if`) | The `else` of an error-union `if` must capture | `else \|_\|` or `else \|e\|` |
+| `error: error union payload is ignored` | The `if` of an error-union `if` must capture | `if (f()) \|v\|` |
 
 ---
 

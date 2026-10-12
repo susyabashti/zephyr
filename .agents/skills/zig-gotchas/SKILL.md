@@ -1,20 +1,15 @@
 ---
 name: zig-gotchas
 description: >
-  Version-independent Zig gotchas, each verified by compiling a failing probe:
-  test discovery is root-file only, multi-line string rules, dangling
-  stack-local slices, error-set algebra (narrowing, exhaustive switches, orelse
-  on Error!?T), integer cast and shift rules, @memcpy length checks, padded
-  signed fmt, std.json ?T fields, std.Io writer buffering and manual flush,
-  catch payload forms, removed std.math.min and array fill-init, comptime
-  blocks, and zig build test quirks (silent success, stale .zig-cache binaries
-  faking crashes, spurious "failed command" from passing tests that print to
-  stderr). Use when writing or
-  debugging Zig, when tests mysteriously do not run, when a segfault or crash
-  trace doesn't match the source on disk, on "error set" compile errors, when
-  zig build test reports a failure but exits 0, or when string, fmt, or JSON
-  parsing misbehaves. Companion to zig-api (version-specific APIs) and
-  zig-tiger-style (style).
+  Version-independent Zig gotchas, each verified by a failing probe: test
+  discovery, multi-line strings, dangling slices, error-set algebra, integer
+  casts, @memcpy, fixed-width fmt, std.json, std.Io buffering and flush,
+  catch forms, allocator free-poisoning, anonymous struct coercion,
+  uninstantiated function bodies, and zig build test quirks (silent success,
+  stale .zig-cache binaries, spurious "failed command"). Use when writing or
+  debugging Zig, when tests mysteriously do not run, on segfaults or "error
+  set" compile errors, or when string, fmt, or JSON misbehaves. Companion to
+  zig-api (version-specific APIs) and zig-tiger-style (style).
 metadata:
   language: "zig"
   category: "programming-language"
@@ -524,3 +519,55 @@ evaluate to the success value's type or diverge:
 `error: incompatible types: 'u32' and '[:0]const u8'`. To inspect the error,
 use `try std.testing.expectError(error.Bang, fail())` in tests, or let the
 error propagate to a scope that can branch on it.
+
+## 18. `Allocator.free` poisons the memory it frees
+
+In 0.17 the generic `Allocator.free` wrapper memsets the entire slice with
+`undefined` before calling `rawFree` (`std/mem/Allocator.zig`,
+`@memset(bytes, undefined)`). In debug builds `undefined` is 0xAA, so freeing
+anything that aliases live data destroys it:
+
+- Freeing a **string literal** or any `.rodata` slice → writes 0xAA to
+  read-only data: segfault, or corrupted literals elsewhere.
+- Freeing an **arena sub-slice** (or a stale copy of an arena slice) → the
+  rest of the arena, including live sibling allocations, becomes 0xAA.
+- **Double-free** (including the `defer` trap below) → the second free
+  re-poisons memory that may have been re-allocated and reused.
+
+Symptoms seen in the wild: a hang inside `compiler_rt.fastMemset` with a
+nonsensical length (a slice header that was 0xAA'd before being iterated),
+0xAA replacement characters in rendered output, segfaults writing to
+`.rodata`, and slice headers read back as `0xAAAAAAAAAAAAAA...`.
+
+- Free exactly what you allocated, once, after the last use. A sub-slice like
+  `s[5..]` is not what the allocator gave you — don't free it.
+- `defer x.deinit()` on a **reassigned** variable is a hidden double-free:
+  defers re-evaluate the variable at scope exit, so five reassignments plus
+  one `defer` free the *last* value five times. Deinit by hand right after
+  use instead.
+- In tests, compare/copy before freeing — an `expectEqualStrings` after
+  `allocator.free(s)` reads the 0xAA'd buffer.
+
+## 19. A function body only compiles when the function is instantiated
+
+Referencing a function does not semantically analyze its body (verified on
+0.17): `test { _ = f; }` passes even when `f`'s body has a type error,
+because `f` is never instantiated. A "does this compile?" probe that only
+takes the function's address proves nothing about its body. Probe by
+calling: `test { _ = f(5); }`.
+
+## 20. Inferred anonymous struct values do not coerce to a named struct
+
+A struct literal in a position with an expected type coerces directly
+(`return .{ .x = 1, .y = 2 };` is fine). A value whose type was *inferred*
+as an anonymous struct does not:
+
+```zig
+pub const Point = struct { x: i32, y: i32 };
+fn make() Point {
+    const p = .{ .x = 1, .y = 2 };
+    return p; // error: expected type 'Point', found 'make__struct_999'
+}
+```
+
+Annotate the const: `const p: Point = .{ .x = 1, .y = 2 };`.
