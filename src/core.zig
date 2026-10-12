@@ -14,3 +14,6 @@ pub const exporter = @import("core/exporter.zig");
 pub const search = @import("core/search.zig");
 pub const timezone = @import("core/timezone.zig");
 pub const nfc = @import("core/nfc.zig");
+pub const tokens = @import("core/tokens.zig");
+pub const derived = @import("core/derived.zig");
+pub const dstore = @import("core/dstore.zig");

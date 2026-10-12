@@ -1,6 +1,8 @@
 //! CLI: zephyr <text>  |  zephyr log [-t TAG]... <text>  |  zephyr verify
 //!     zephyr today | yesterday | week | on YYYY-MM-DD  |  zephyr search <q>
-//!     zephyr edit <seq> [-t TAG]... <text>  |  zephyr rm <seq>
+//!     zephyr ask [from:to] <question...>  |  zephyr recap [start..end]
+//!     zephyr profile  |  zephyr derived status|rebuild
+//!     zephyr edit <seq> [-t TAG]... "text"  |  zephyr rm <seq>
 //!     zephyr redact <seq> [--yes]  |  zephyr checkpoint [--key PATH]
 //!     zephyr export --for-ai [YYYY-MM-DD[:YYYY-MM-DD]]
 //!     zephyr ots-stamp <segment> --proof <path>  |  zephyr ots-export <segment> [--out <path>]
@@ -32,7 +34,8 @@ pub const RunError = error{
     core.journal.Journal.CheckAnchorsError || core.journal.Journal.WriteAnchorError ||
     core.journal.Journal.CheckOtsAnchorsError || core.journal.Journal.OtsCheckFailure ||
     core.ots.VerifyError ||
-    core.view.RenderError || File.OpenError || File.Writer.Error || std.Io.Reader.ShortError ||
+    core.view.RenderError || core.dstore.PackError || core.dstore.StatusError ||
+    core.dstore.RebuildError || File.OpenError || File.Writer.Error || std.Io.Reader.ShortError ||
     std.crypto.errors.IdentityElementError || std.process.CurrentPathError || mcp.server.RunError;
 
 pub fn run(init: std.process.Init, args: []const []const u8) RunError!void {
@@ -88,6 +91,14 @@ pub fn run(init: std.process.Init, args: []const []const u8) RunError!void {
             try runExport(arena, io, err_file, out, init.environ_map, path, rest);
         } else if (std.mem.eql(u8, command, "search")) {
             try runSearch(arena, io, err_file, out, init.environ_map, path, rest);
+        } else if (std.mem.eql(u8, command, "ask")) {
+            try runAsk(arena, io, err_file, out, init.environ_map, path, rest);
+        } else if (std.mem.eql(u8, command, "recap")) {
+            try runRecap(arena, io, err_file, out, init.environ_map, path, rest);
+        } else if (std.mem.eql(u8, command, "profile")) {
+            try runProfile(arena, io, err_file, out, init.environ_map, path);
+        } else if (std.mem.eql(u8, command, "derived")) {
+            try runDerived(arena, io, err_file, out, init.environ_map, path, rest);
         } else if (std.mem.eql(u8, command, "edit")) {
             try runEdit(arena, io, err_file, out, init.environ_map, path, rest);
         } else if (std.mem.eql(u8, command, "rm")) {
@@ -116,7 +127,9 @@ fn isCommand(s: []const u8) bool {
     return std.mem.eql(u8, s, "log") or std.mem.eql(u8, s, "verify") or
         std.mem.eql(u8, s, "today") or std.mem.eql(u8, s, "yesterday") or
         std.mem.eql(u8, s, "week") or std.mem.eql(u8, s, "on") or
-        std.mem.eql(u8, s, "search") or std.mem.eql(u8, s, "edit") or
+        std.mem.eql(u8, s, "search") or std.mem.eql(u8, s, "ask") or
+        std.mem.eql(u8, s, "recap") or std.mem.eql(u8, s, "profile") or
+        std.mem.eql(u8, s, "derived") or std.mem.eql(u8, s, "edit") or
         std.mem.eql(u8, s, "rm") or std.mem.eql(u8, s, "redact") or
         std.mem.eql(u8, s, "checkpoint") or std.mem.eql(u8, s, "export") or
         std.mem.eql(u8, s, "ots-stamp") or std.mem.eql(u8, s, "ots-export") or
@@ -236,6 +249,158 @@ fn runSearch(
     defer arena.free(matches);
     const rendered = try core.search.render(arena, matches, query);
     try printBlock(out, io, rendered);
+}
+
+// ---------------------------------------------------------------- derived layer (Phase 7)
+
+fn runAsk(
+    arena: Allocator,
+    io: Io,
+    err_file: File,
+    out: File,
+    environ_map: *const std.process.Environ.Map,
+    path: []const u8,
+    rest: []const []const u8,
+) RunError!void {
+    // Optional leading period: YYYY-MM-DD or YYYY-MM-DD:YYYY-MM-DD.
+    var range: ?core.view.DayRange = null;
+    var question_args = rest;
+    if (rest.len > 0) {
+        if (parseDayRange(rest[0])) |r| {
+            range = r;
+            question_args = rest[1..];
+        }
+    }
+    const question = try joinParts(arena, question_args);
+    if (question.len == 0) return error.Usage;
+    const journal = try openReadJournal(arena, io, err_file, environ_map, path);
+    defer journal.close();
+    const result = try verifyOrReport(arena, io, err_file, &journal);
+    const recs = try journal.collectRecords(arena);
+    defer recs.deinit();
+    const visible = try core.view.visibleEntries(arena, recs.headers, recs.payloads);
+    defer visible.deinit();
+    // Period: the explicit range, else a YYYY-MM-DD in the question, else
+    // the current week (spec/derived.md section 7, step 4).
+    const pack_range = try core.dstore.resolveRange(io, &journal, range, question);
+    const pack = try core.dstore.contextPack(arena, &journal, &visible, result, question, pack_range, true);
+    try printBlock(out, io, pack);
+}
+
+/// The Mon-Sun week containing now, under the journal's timezone.
+fn currentWeek(journal: *const core.journal.Journal) RunError!core.view.DayRange {
+    const now_ms = nowMs(journal.io);
+    const offset = try journal.tzOffsetMinutesAtMs(now_ms);
+    const today = try core.view.localDay(now_ms, offset);
+    const monday = core.view.weekStart(today);
+    return core.view.DayRange{ .start = monday, .end = monday + 7 };
+}
+
+/// `YYYY-MM-DD..YYYY-MM-DD` (inclusive) or a single `YYYY-MM-DD`.
+fn parseDotDayRange(s: []const u8) ?core.view.DayRange {
+    const split = std.mem.indexOf(u8, s, "..") orelse {
+        const day = parseCivilDate(s) orelse return null;
+        return core.view.DayRange{ .start = day, .end = day + 1 };
+    };
+    const start = parseCivilDate(s[0..split]) orelse return null;
+    const end = parseCivilDate(s[split + 2 ..]) orelse return null;
+    if (end < start) return null;
+    return core.view.DayRange{ .start = start, .end = end + 1 };
+}
+
+fn runRecap(
+    arena: Allocator,
+    io: Io,
+    err_file: File,
+    out: File,
+    environ_map: *const std.process.Environ.Map,
+    path: []const u8,
+    rest: []const []const u8,
+) RunError!void {
+    if (rest.len > 1) return error.Usage;
+    var range: ?core.view.DayRange = null;
+    if (rest.len == 1) {
+        range = parseDotDayRange(rest[0]) orelse return error.Usage;
+    }
+    const journal = try openReadJournal(arena, io, err_file, environ_map, path);
+    defer journal.close();
+    const result = try verifyOrReport(arena, io, err_file, &journal);
+    const recs = try journal.collectRecords(arena);
+    defer recs.deinit();
+    const visible = try core.view.visibleEntries(arena, recs.headers, recs.payloads);
+    defer visible.deinit();
+    if (range == null) range = try currentWeek(&journal);
+    const digest = try core.dstore.digestOrRebuild(arena, &journal, &visible, range.?, result);
+    try printBlock(out, io, digest);
+}
+
+fn runProfile(
+    arena: Allocator,
+    io: Io,
+    err_file: File,
+    out: File,
+    environ_map: *const std.process.Environ.Map,
+    path: []const u8,
+) RunError!void {
+    const journal = try openReadJournal(arena, io, err_file, environ_map, path);
+    defer journal.close();
+    const result = try verifyOrReport(arena, io, err_file, &journal);
+    const recs = try journal.collectRecords(arena);
+    defer recs.deinit();
+    const visible = try core.view.visibleEntries(arena, recs.headers, recs.payloads);
+    defer visible.deinit();
+    const doc = try core.dstore.profileWithNotes(arena, &journal, &visible, result);
+    try printBlock(out, io, doc);
+}
+
+fn runDerived(
+    arena: Allocator,
+    io: Io,
+    err_file: File,
+    out: File,
+    environ_map: *const std.process.Environ.Map,
+    path: []const u8,
+    rest: []const []const u8,
+) RunError!void {
+    if (rest.len != 1) return error.Usage;
+    const journal = try openReadJournal(arena, io, err_file, environ_map, path);
+    defer journal.close();
+    const result = try verifyOrReport(arena, io, err_file, &journal);
+    if (std.mem.eql(u8, rest[0], "status")) {
+        var report = try core.dstore.artifactStatus(arena, &journal, result);
+        defer report.deinit();
+        for (report.items) |a| {
+            try printLine(out, io, try renderStatusLine(arena, a));
+        }
+    } else if (std.mem.eql(u8, rest[0], "rebuild")) {
+        const recs = try journal.collectRecords(arena);
+        defer recs.deinit();
+        const visible = try core.view.visibleEntries(arena, recs.headers, recs.payloads);
+        defer visible.deinit();
+        const counts = try core.dstore.rebuild(arena, &journal, &visible, result);
+        try printLine(out, io, try arena.print(
+            "rebuilt: {d} words, {d} entities (digests regenerate on demand)",
+            .{ counts.word_count, counts.entity_count },
+        ));
+    } else {
+        return error.Usage;
+    }
+}
+
+fn renderStatusLine(arena: Allocator, a: core.dstore.Artifact) Allocator.Error![]const u8 {
+    const head = if (a.head) |h| try hexOf(arena, &h) else "-";
+    var line = try arena.print("{s}  head={s}", .{ a.name, head });
+    if (a.version) |v| {
+        const extra = try arena.print("  v{d}  {d} records", .{ v, a.record_count.? });
+        line = try arena.print("{s}{s}", .{ line, extra });
+    }
+    const state = switch (a.state) {
+        .fresh => "fresh",
+        .stale => "stale",
+        .corrupt => "corrupt",
+        .missing => "missing",
+    };
+    return try arena.print("{s}  {s}", .{ line, state });
 }
 
 // ---------------------------------------------------------------- edit / rm
@@ -990,6 +1155,16 @@ fn printUsage(file: File, io: Io) File.Writer.Error!void {
         \\                                   or the current week (Mon-Sun)
         \\  zephyr on YYYY-MM-DD              entries on a specific date
         \\  zephyr search "query"             keyword search
+        \\  zephyr ask [from:to] <question...>
+        \\                                   deterministic context pack for
+        \\                                   the user's AI: profile, notes,
+        \\                                   period digest, keyword matches.
+        \\                                   from:to is YYYY-MM-DD[:YYYY-MM-DD]
+        \\  zephyr recap [start..end]         period digest (default: the
+        \\                                   current week, Mon-Sun)
+        \\  zephyr profile                    derived profile plus notes.md
+        \\  zephyr derived status|rebuild     inspect or force-rebuild the
+        \\                                   derived artifacts
         \\  zephyr edit <seq> [-t TAG]... "text"
         \\                                   amend an entry (tags kept unless
         \\                                   -t is given)

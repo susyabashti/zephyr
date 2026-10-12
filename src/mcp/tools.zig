@@ -63,6 +63,15 @@ const tools_all = [_]Tool{
         .input_schema = "{\"type\":\"object\",\"properties\":{}}",
     },
     .{
+        .name = "get_context",
+        .description = "Deterministic context pack for answering a question from the journal: " ++
+            "provenance, the question verbatim, the derived profile, the user's notes, the " ++
+            "period digest, keyword matches, and an instruction to answer only from the pack. " ++
+            "from/to are optional YYYY-MM-DD dates bounding the period (a single date covers " ++
+            "that day; no dates: a YYYY-MM-DD in the question, else the current week).",
+        .input_schema = "{\"type\":\"object\",\"properties\":{\"question\":{\"type\":\"string\",\"description\":\"The question to answer from the journal.\"},\"from\":{\"type\":\"string\",\"description\":\"Period start date, YYYY-MM-DD (optional).\"},\"to\":{\"type\":\"string\",\"description\":\"Period end date, YYYY-MM-DD, inclusive (optional).\"}},\"required\":[\"question\"]}",
+    },
+    .{
         .name = "add_entry",
         .description = "Append a new entry to the journal with the current time. " ++
             "Only advertised when the server was started with --allow-write.",
@@ -72,8 +81,8 @@ const tools_all = [_]Tool{
 };
 
 pub fn list(allow_write: bool) []const Tool {
-    comptime std.debug.assert(std.mem.eql(u8, tools_all[5].name, "add_entry"));
-    return tools_all[0..(if (allow_write) tools_all.len else 5)];
+    comptime std.debug.assert(std.mem.eql(u8, tools_all[6].name, "add_entry"));
+    return tools_all[0..(if (allow_write) tools_all.len else 6)];
 }
 
 /// The payload of a validated add_entry call.
@@ -98,6 +107,12 @@ pub const ToolCall = union(enum) {
     },
     get_profile: struct {},
     verify_status: struct {},
+    get_context: struct {
+        question: []const u8,
+        /// Null when the call carried no from/to: the period falls back to
+        /// a YYYY-MM-DD in the question, else the current week.
+        range: ?view.DayRange,
+    },
     add_entry: AddEntry,
 };
 
@@ -113,6 +128,11 @@ const SearchArgs = struct {
 const DigestArgs = struct {
     period: []const u8,
 };
+const GetContextArgs = struct {
+    question: []const u8,
+    from: ?[]const u8 = null,
+    to: ?[]const u8 = null,
+};
 const AddEntryArgs = struct {
     text: []const u8,
     tags: ?[]const []const u8 = null,
@@ -125,6 +145,7 @@ pub const RejectError = std.json.ParseFromValueError || error{
     WriteDisabled,
     EmptyText,
     EmptyQuery,
+    EmptyQuestion,
     BadDate,
     InvertedRange,
     BadPeriod,
@@ -168,6 +189,26 @@ pub fn validate(
         _ = try parseArgs(NoArgs, allocator, params);
         return .verify_status;
     }
+    if (std.mem.eql(u8, name, "get_context")) {
+        const args = try parseArgs(GetContextArgs, allocator, params);
+        if (args.question.len == 0) return error.EmptyQuestion;
+        var range: ?view.DayRange = null;
+        if (args.from) |from| {
+            const start = parseDate(from) orelse return error.BadDate;
+            // to is inclusive; range.end is exclusive. A bare from covers
+            // that day; a bare to (no from) likewise.
+            const end = if (args.to) |to|
+                parseDate(to) orelse return error.BadDate
+            else
+                start;
+            if (start > end) return error.InvertedRange;
+            range = view.DayRange{ .start = start, .end = end + 1 };
+        } else if (args.to) |to| {
+            const day = parseDate(to) orelse return error.BadDate;
+            range = view.DayRange{ .start = day, .end = day + 1 };
+        }
+        return .{ .get_context = .{ .question = args.question, .range = range } };
+    }
     if (std.mem.eql(u8, name, "add_entry")) {
         if (!allow_write) return error.WriteDisabled;
         const args = try parseArgs(AddEntryArgs, allocator, params);
@@ -207,7 +248,7 @@ pub const Outcome = struct {
 
 /// Failures of `execute`: reported as an `isError` tool result.
 pub const CallError = Allocator.Error || journal_mod.Journal.VerifyError || journal_mod.Journal.AppendError ||
-    view.RenderError || core.timezone.LoadError || error{
+    view.RenderError || core.timezone.LoadError || core.dstore.PackError || core.dstore.ResolveRangeError || error{
     VerifyFailed,
     ClockBeforeEpoch,
 };
@@ -220,6 +261,7 @@ pub fn execute(arena: Allocator, io: Io, journal: *const journal_mod.Journal, ca
         .search => |args| searchText(arena, journal, args.query, args.limit),
         .get_profile => getProfile(arena, journal),
         .verify_status => verifyStatus(arena, journal),
+        .get_context => |args| getContext(arena, io, journal, args.question, args.range),
         .add_entry => |args| addEntry(arena, io, journal, args),
     };
 }
@@ -275,16 +317,39 @@ fn getProfile(arena: Allocator, journal: *const journal_mod.Journal) CallError!O
     const v = try verified(arena, journal);
     if (v.recs == null) return Outcome{ .text = try refuseText(arena, v.result), .is_error = true };
     const prov = try provenanceLine(arena, v.result);
+    // The user's notes under a heading, so the AI can tell machine fact
+    // from user voice (spec/derived.md sections 6 and 7).
+    const notes_section = blk: {
+        const notes = journal.readJournalFile(arena, "notes.md") catch |err| switch (err) {
+            error.FileNotFound => break :blk try arena.print("# notes\n(no notes)\n", .{}),
+            else => |e| return e,
+        };
+        const newline = if (notes.len > 0 and notes[notes.len - 1] != '\n') "\n" else "";
+        break :blk try arena.print("# notes\n{s}{s}", .{ notes, newline });
+    };
     const doc = journal.readJournalFile(arena, "profile.md") catch |err| switch (err) {
         error.FileNotFound => return Outcome{
-            .text = try arena.print("{s}no profile document at profile.md\n", .{prov}),
+            .text = try arena.print("{s}no profile document at profile.md\n{s}", .{ prov, notes_section }),
             .is_error = false,
         },
         else => |e| return e,
     };
     const newline = if (doc.len > 0 and doc[doc.len - 1] != '\n') "\n" else "";
-    const text = try arena.print("{s}{s}{s}", .{ prov, doc, newline });
+    const text = try arena.print("{s}{s}{s}{s}", .{ prov, doc, newline, notes_section });
     return Outcome{ .text = text, .is_error = false };
+}
+
+fn getContext(arena: Allocator, io: Io, journal: *const journal_mod.Journal, question: []const u8, range: ?view.DayRange) CallError!Outcome {
+    const v = try verified(arena, journal);
+    const recs = v.recs orelse return Outcome{ .text = try refuseText(arena, v.result), .is_error = true };
+    defer recs.deinit();
+    const visible = try view.visibleEntries(arena, recs.headers, recs.payloads);
+    defer visible.deinit();
+    // The server is read-only: the pack is computed in memory (persist =
+    // false); the CLI's ask/derived commands are the persisting surface.
+    const pack_range = try core.dstore.resolveRange(io, journal, range, question);
+    const pack = try core.dstore.contextPack(arena, journal, &visible, v.result, question, pack_range, false);
+    return Outcome{ .text = pack, .is_error = false };
 }
 
 fn verifyStatus(arena: Allocator, journal: *const journal_mod.Journal) CallError!Outcome {
@@ -430,4 +495,14 @@ test "validate: argument checks and tool gating" {
     // No-arg tools accept absent params; unknown extra args are ignored.
     _ = try validate(allocator, false, "verify_status", null, jan15);
     _ = try validate(allocator, false, "get_profile", std.json.parseFromSliceLeaky(protocol.Value, allocator, "{\"bogus\":1}", .{}), jan15);
+
+    // get_context: question required; period bounds validated like get_entries.
+    try std.testing.expectError(error.EmptyQuestion, validate(allocator, false, "get_context", std.json.parseFromSliceLeaky(protocol.Value, allocator, "{\"question\":\"\"}", .{}), jan15));
+    try std.testing.expectError(error.BadDate, validate(allocator, false, "get_context", std.json.parseFromSliceLeaky(protocol.Value, allocator, "{\"question\":\"q\",\"from\":\"2026-13-01\"}", .{}), jan15));
+    try std.testing.expectError(error.InvertedRange, validate(allocator, false, "get_context", std.json.parseFromSliceLeaky(protocol.Value, allocator, "{\"question\":\"q\",\"from\":\"2026-01-16\",\"to\":\"2026-01-15\"}", .{}), jan15));
+    const ctx = try validate(allocator, false, "get_context", std.json.parseFromSliceLeaky(protocol.Value, allocator, "{\"question\":\"what\"}", .{}), jan15);
+    try std.testing.expectEqual(@as(?view.DayRange, null), ctx.get_context.range);
+    const ctx_range = try validate(allocator, false, "get_context", std.json.parseFromSliceLeaky(protocol.Value, allocator, "{\"question\":\"what\",\"from\":\"2026-01-15\",\"to\":\"2026-01-16\"}", .{}), jan15);
+    try std.testing.expectEqual(jan15, ctx_range.get_context.range.?.start);
+    try std.testing.expectEqual(jan15 + 2, ctx_range.get_context.range.?.end);
 }

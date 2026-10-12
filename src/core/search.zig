@@ -49,22 +49,44 @@ pub fn find(allocator: Allocator, visible: *const view.Visible, query: []const u
 /// Renders matches: a count line, then one line per match:
 /// `{seq:0>4}  YYYY-MM-DD HH:MM  [tag]... text`
 pub fn render(allocator: Allocator, matches: []const Match, query: []const u8) RenderError![]u8 {
+    return renderCapped(allocator, matches, query, std.math.maxInt(usize));
+}
+
+/// Same as `render`, but match lines stop once their combined size would
+/// exceed `max_bytes`; when cut, a truncation note is appended. The count
+/// line always shows the full match count.
+pub fn renderCapped(allocator: Allocator, matches: []const Match, query: []const u8, max_bytes: usize) RenderError![]u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
     const plural = if (matches.len == 1) "" else "es";
     try tryLine(allocator, &out, "# {d} match{s} for \"{s}\"", .{ matches.len, plural, query });
     try out.append(allocator, '\n');
+    var scratch: [1 << 16]u8 = undefined;
+    var used: usize = 0;
+    var shown: usize = 0;
     for (matches) |m| {
+        // Render the line into scratch first so the cap is exact.
+        var pos: usize = 0;
         const date = view.civilDate(m.day) catch return error.TimestampOutOfRange;
         const time = view.timeString(m.ts_ms, m.tz_offset_min);
-        try tryLine(allocator, &out, "{d:0>4}  {d:0>4}-{d:0>2}-{d:0>2} {s}  ", .{
+        pos += (std.fmt.bufPrint(scratch[pos..], "{d:0>4}  {d:0>4}-{d:0>2}-{d:0>2} {s}  ", .{
             m.seq, date.year, date.month, date.day, time,
-        });
+        }) catch unreachable).len;
         for (m.tags) |tag| {
-            try tryLine(allocator, &out, "[{s}]", .{tag});
+            pos += (std.fmt.bufPrint(scratch[pos..], "[{s}]", .{tag}) catch unreachable).len;
         }
-        if (m.tags.len > 0) try out.append(allocator, ' ');
-        try tryLine(allocator, &out, "{s}", .{m.text});
+        if (m.tags.len > 0) {
+            scratch[pos] = ' ';
+            pos += 1;
+        }
+        pos += (std.fmt.bufPrint(scratch[pos..], "{s}\n", .{m.text}) catch unreachable).len;
+        if (shown > 0 and used + pos > max_bytes) break;
+        try out.appendSlice(allocator, scratch[0..pos]);
+        used += pos;
+        shown += 1;
+    }
+    if (shown < matches.len) {
+        try tryLine(allocator, &out, "... {d} more match(es) not shown", .{matches.len - shown});
         try out.append(allocator, '\n');
     }
     return out.toOwnedSlice(allocator);
@@ -97,13 +119,13 @@ test "search: case-insensitive substring, viewable entries only" {
     // seq 0: entry "bought MILK"; seq 1: entry with tag; seq 2: private.
     const h0 = try makeEntry(allocator, "bought milk", 1_767_225_600_000, 0, &genesis);
     const h1 = try makeEntry(allocator, "walked", 1_767_225_660_000, 0, &h0.header.record_hash);
-    const h2 = try makeEntry(allocator, "SECRET milk run", 1_767_225_720_000, 0, &h1.header.record_hash);
+    var h2 = try makeEntry(allocator, "SECRET milk run", 1_767_225_720_000, 0, &h1.header.record_hash);
     h2.header.flags = records.FlagPrivate;
     h2.header.seq = 2;
     h2.header.record_hash = recompute(&h2.header, &h1.header.record_hash);
 
     const headers = [_]records.Header{ h0.header, h1.header, h2.header };
-    const payloads = [_][]const u8{ &h0.payload, &h1.payload, &h2.payload };
+    const payloads = [_][]const u8{ h0.payload, h1.payload, h2.payload };
 
     const visible = try view.visibleEntries(allocator, &headers, &payloads);
     defer visible.deinit();

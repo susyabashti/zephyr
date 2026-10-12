@@ -1,9 +1,16 @@
-# Zephyr MCP Server — Phase 6 (FROZEN)
+# Zephyr MCP Server — Phase 6 (FROZEN, amended by Phase 7)
 
 Read-only AI access to the journal over the Model Context Protocol (MCP),
 stdio transport. Companion to `record-format.md`. The wire contract is
 checked by `test/phase6.zig` (in-process) and `test/mcpref.py` (real
 process, independent client).
+
+**Phase 7 amendment** (`spec/derived.md` section 7): the tool list grows
+from 5 to 6 read-only tools — `get_context` is added — and `get_profile`
+results now carry the user's notes under a `# notes` heading (a one-line
+note when `notes.md` is absent). `get_context` is read-only: the pack is
+computed in memory and the server never writes or migrates derived
+artifacts. The five pre-existing tools keep their byte-exact behavior.
 
 ## 1. Surface
 
@@ -45,7 +52,7 @@ same line the LLM view renderer emits (record-format section 9). A failed
 ## 4. Verify before trust
 
 Every tool (`get_entries`, `search`, `get_digest`, `get_profile`,
-`add_entry`) runs the full chain verify first. A journal that fails verify
+`get_context`, `add_entry`) runs the full chain verify first. A journal that fails verify
 gets a tool error result (`isError: true`) naming the exact failure
 (`FAIL: <file> seq <n> <field>: <detail>`) and serves no data.
 `verify_status` reports the same state as data. Anchor and OTS checks are
@@ -58,8 +65,9 @@ out of scope for the server; they belong to `zephyr verify`.
 | `get_entries` | `from` date (required), `to` date (optional, inclusive) | LLM view for [from, to] |
 | `search` | `query` string (required, non-empty), `limit` integer (optional, default 20, min 1) | Up to `limit` matches, in view order |
 | `get_digest` | `period` = `week` \| `month` (required) | LLM view of the current week (Mon-Sun) or month, in the journal's timezone |
-| `get_profile` | — | Contents of `<journal>/profile.md`, or a "no profile" note |
+| `get_profile` | — | Contents of `<journal>/profile.md` (the derived profile once Phase 7 has rendered it), or a "no profile" note; the user's `notes.md` follows under a `# notes` heading (a one-line note when absent) |
 | `verify_status` | — | `ok: N record(s), head <hex>[, R redacted]`, or the FAIL line |
+| `get_context` | `question` string (required, non-empty), `from`/`to` dates (optional, `YYYY-MM-DD`) | The deterministic context pack (derived.md section 7), same bytes `zephyr ask` prints: provenance, question, derived profile, notes, period digest, keyword matches, answer footer. `from`/`to` bound the period (a single date covers that day); absent, a `YYYY-MM-DD` in the question, else the current week. Read-only: nothing is written. |
 | `add_entry` | `text` string (required, non-empty), `tags` string[] (optional) | `logged seq N` plus the post-write provenance. Only with `--allow-write`. |
 
 Dates are `YYYY-MM-DD` civil dates under each entry's own local timezone
@@ -72,8 +80,10 @@ tombstoned entries are omitted, redacted entries render as the
 text. `search` never matches private or redacted content.
 
 `get_profile` reads `<journal>/profile.md` (plain text, user-maintained;
-the Phase 7 derived layer takes it over). The provenance line is included
-even when the profile is missing.
+the Phase 7 derived layer takes it over) and appends the user's `notes.md`
+under a `# notes` heading (or a one-line note when `notes.md` is absent),
+so an AI client can tell machine-fact from user-voice. The provenance line
+is included even when the profile is missing.
 
 ## 6. Limits
 

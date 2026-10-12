@@ -131,6 +131,18 @@ pub fn build(b: *std.Build) void {
     const phase6_tests = b.addTest(.{ .root_module = phase6_module });
     const run_phase6_tests = b.addRunArtifact(phase6_tests);
 
+    // Phase 7: derived layer gates (rebuild determinism, staleness, oracle
+    // agreement, migration, status/rebuild) on an in-memory-I/O journal.
+    const phase7_module = b.createModule(.{
+        .root_source_file = b.path("test/phase7.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "zephyr_core", .module = core },
+        },
+    });
+    const phase7_tests = b.addTest(.{ .root_module = phase7_module });
+    const run_phase7_tests = b.addRunArtifact(phase7_tests);
+
     // Phase 5b: OpenTimestamps proof format (pinned vectors + corruption
     // suite), and the stamp/verify/redaction gates on an on-disk journal.
     const ots_module = b.createModule(.{
@@ -175,6 +187,10 @@ pub fn build(b: *std.Build) void {
         "src/core/nfc.zig",
         "src/core/timezone.zig",
         "src/core/mark_ranges.zig",
+        "src/core/search.zig",
+        "src/core/tokens.zig",
+        "src/core/derived.zig",
+        "src/core/dstore.zig",
         // Phase 6: pure wire protocol (self-contained; no core imports).
         "src/mcp/protocol.zig",
     };
@@ -196,6 +212,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_ots_tests.step);
     test_step.dependOn(&run_phase5b_tests.step);
     test_step.dependOn(&run_phase6_tests.step);
+    test_step.dependOn(&run_phase7_tests.step);
 
     const fmt_step = b.step("fmt", "Run format checks");
     fmt_step.dependOn(&b.addFmt(.{ .paths = b.pathList(&.{ "src", "test", "build.zig" }) }).step);

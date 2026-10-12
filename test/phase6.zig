@@ -245,8 +245,9 @@ test "phase 6: tools/list advertises read-only tools and the gated write tool" {
     const resp = try f.send(allocator, try line(allocator, "3", "tools/list", null));
     const v = json(allocator, resp);
     const tool_list = v.object.get("result").?.object.get("tools").?.array;
-    try std.testing.expectEqual(@as(usize, 5), tool_list.items.len);
-    const names = [_][]const u8{ "get_entries", "search", "get_digest", "get_profile", "verify_status" };
+    try std.testing.expectEqual(@as(usize, 6), tool_list.items.len);
+    // Phase 7 adds get_context; add_entry (below) stays the only gated tool.
+    const names = [_][]const u8{ "get_entries", "search", "get_digest", "get_profile", "verify_status", "get_context" };
     for (names, 0..) |want, i| {
         try std.testing.expectEqualStrings(want, tool_list.items[i].object.get("name").?.string);
         try std.testing.expect(tool_list.items[i].object.get("inputSchema") != null);
@@ -259,8 +260,8 @@ test "phase 6: tools/list advertises read-only tools and the gated write tool" {
     const resp2 = try w.send(allocator, try line(allocator, "4", "tools/list", null));
     const v2 = json(allocator, resp2);
     const list2 = v2.object.get("result").?.object.get("tools").?.array;
-    try std.testing.expectEqual(@as(usize, 6), list2.items.len);
-    try std.testing.expectEqualStrings("add_entry", list2.items[5].object.get("name").?.string);
+    try std.testing.expectEqual(@as(usize, 7), list2.items.len);
+    try std.testing.expectEqualStrings("add_entry", list2.items[6].object.get("name").?.string);
 }
 
 test "phase 6: get_entries serves the date and hides private and redacted content" {
@@ -434,23 +435,32 @@ test "phase 6: get_profile serves the document or its absence" {
 
     const profile_line = try line(allocator, "15", "tools/call", "{\"name\":\"get_profile\"}");
 
-    // Missing: a note, still with the provenance line.
+    // Missing: a note, still with the provenance line, and the notes
+    // section (Phase 7) reports its absence in one line.
     const resp = try f.send(allocator, profile_line);
     const text = try toolText(allocator, resp);
     try std.testing.expect(contains(text, "# zephyr: seq 0..4 head="));
     try std.testing.expect(contains(text, "no profile document at profile.md"));
+    try std.testing.expect(contains(text, "# notes"));
+    try std.testing.expect(contains(text, "(no notes)"));
 
-    // Present: the document content after the provenance line.
+    // Present: the document content after the provenance line, then the
+    // user's notes under a heading.
     const d = try Dir.openDirAbsolute(io, f.journal.path, .{});
     defer Dir.close(d, io);
     var file = try Dir.createFile(d, io, "profile.md", .{});
     try file.writeStreamingAll(io, "# Profile\n- building Zephyr in Zig\n");
     file.close(io);
+    var notes_file = try Dir.createFile(d, io, "notes.md", .{});
+    try notes_file.writeStreamingAll(io, "I live in Berlin.\n");
+    notes_file.close(io);
     const resp2 = try f.send(allocator, profile_line);
     const text2 = try toolText(allocator, resp2);
     try std.testing.expect(contains(text2, "# zephyr: seq 0..4 head="));
     try std.testing.expect(contains(text2, "# Profile"));
     try std.testing.expect(contains(text2, "- building Zephyr in Zig"));
+    try std.testing.expect(contains(text2, "# notes"));
+    try std.testing.expect(contains(text2, "I live in Berlin."));
 }
 
 test "phase 6: json-rpc edge cases over the dispatch" {

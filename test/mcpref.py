@@ -7,9 +7,10 @@ client uses. The fixture journal is rendered by test/reference.py, so the
 bytes the server serves were produced by the independent reference
 implementation, not by the Zig code under test.
 
-Checks (spec/mcp.md sections 2, 4, 5, 6):
+Checks (spec/mcp.md sections 2, 4, 5, 6, plus the Phase 7 amendment):
   - the initialize handshake (version echo, capabilities) and lifecycle;
-  - tools/list advertises the read-only tools, never add_entry;
+  - tools/list advertises the six read-only tools (incl. get_context),
+    never add_entry;
   - get_entries and search respect the view rules (private excluded,
     redacted marker, provenance line first);
   - verify-before-trust: a corrupted chain is flagged by verify_status
@@ -17,7 +18,11 @@ Checks (spec/mcp.md sections 2, 4, 5, 6):
   - add_entry is a protocol error by default, and appends a real entry
     when the server was started with --allow-write (a separate process);
   - a line over 1 MiB is one parse error and the server keeps going;
-  - get_profile serves the document or its absence.
+  - get_profile serves the document or its absence, plus the user's
+    notes under a # notes heading (Phase 7);
+  - get_context serves the deterministic context pack: provenance,
+    question, profile, notes, the period digest, matches, footer —
+    byte-identical to a second call, and period-bounded by from/to.
 
 Usage:
   python3 test/mcpref.py --check [path-to-zephyr]
@@ -184,7 +189,8 @@ def run_gate(binary):
         resp = c.request("tools/list")
         tools = resp.get("result", {}).get("tools", [])
         names = [t.get("name") for t in tools]
-        expect(names == ["get_entries", "search", "get_digest", "get_profile", "verify_status"],
+        expect(names == ["get_entries", "search", "get_digest", "get_profile",
+                         "verify_status", "get_context"],
                f"tools/list: {names}")
         for t in tools:
             expect("inputSchema" in t, f"tools/list: {t.get('name')} has no inputSchema")
@@ -253,11 +259,39 @@ def run_gate(binary):
         resp, text = call(c, "get_profile")
         expect(text.startswith(prov), f"get_profile: provenance: {text!r}")
         expect("no profile document at profile.md" in text, f"get_profile: {text!r}")
+        expect("# notes\n(no notes)\n" in text, f"get_profile: no-notes note: {text!r}")
         with open(os.path.join(ro_dir, "profile.md"), "w", encoding="utf-8") as f:
             f.write("# Profile\n- building Zephyr in Zig\n")
+        with open(os.path.join(ro_dir, "notes.md"), "w", encoding="utf-8") as f:
+            f.write("I live in Berlin.\n")
         resp, text = call(c, "get_profile")
         expect("# Profile" in text, f"get_profile present: {text!r}")
         expect("- building Zephyr in Zig" in text, f"get_profile present: {text!r}")
+        expect("# notes\nI live in Berlin.\n" in text, f"get_profile notes: {text!r}")
+
+        # get_context: the pack is deterministic (same bytes twice), carries
+        # the fixed sections in order, and from/to bound the digest period.
+        # "auth" is a token of fixture entry 0; the rest are stopwords.
+        resp, text1 = call(c, "get_context", {"question": "anything about auth?", "from": "2026-01-01", "to": "2026-01-01"})
+        resp2, text2 = call(c, "get_context", {"question": "anything about auth?", "from": "2026-01-01", "to": "2026-01-01"})
+        expect(text1 == text2, f"get_context not deterministic: {text1!r} vs {text2!r}")
+        expect(text1.startswith(prov), f"get_context: provenance: {text1!r}")
+        expect("# question: anything about auth?\n" in text1, f"get_context: question: {text1!r}")
+        expect("# notes\nI live in Berlin.\n" in text1, f"get_context: notes: {text1!r}")
+        expect("# zephyr-digest: period=2026-01-01..2026-01-01" in text1,
+               f"get_context: period: {text1!r}")
+        expect(text1.rstrip().endswith(
+            "Answer using only the entries above; cite seqs; "
+            "say so if the answer is not present."),
+            f"get_context: footer: {text1!r}")
+        # Retrieval is exact-token (not substring): entry 0 carries "auth".
+        expect("0000  " in text1, f"get_context: matches: {text1!r}")
+        expect("PRIVATE-MCP-MARKER-4d7e" not in text1, f"get_context: private leaked: {text1!r}")
+        expect("sensitive meeting notes" not in text1, f"get_context: redacted leaked: {text1!r}")
+        # A stopword-only question still gets the pack, without matches.
+        resp, text3 = call(c, "get_context", {"question": "what"})
+        expect("# 0 matches for \"what\"\n" not in text3, f"get_context: no match section expected: {text3!r}")
+        expect("# notes" in text3, f"get_context: notes: {text3!r}")
 
         resp, _ = call(c, "get_digest", {"period": "year"})
         expect(resp.get("error", {}).get("code") == -32602, f"get_digest year: {resp}")
@@ -279,7 +313,8 @@ def run_gate(binary):
         handshake(w)
         resp = w.request("tools/list")
         names = [t.get("name") for t in resp.get("result", {}).get("tools", [])]
-        expect("add_entry" in names and len(names) == 6, f"write tools/list: {names}")
+        expect("add_entry" in names and len(names) == 7, f"write tools/list: {names}")
+        expect(names[-1] == "add_entry", f"write tools/list: add_entry last: {names}")
 
         resp, text = call(w, "add_entry", {"text": "MCP-REF-WRITE-9c31", "tags": ["mcp"]})
         expect("logged seq 5" in text, f"add_entry: {text!r}")
