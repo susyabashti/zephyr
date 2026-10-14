@@ -570,4 +570,27 @@ fn make() Point {
 }
 ```
 
-Annotate the const: `const p: Point = .{ .x = 1, .y = 2 };`.
+Annotate the const: `const p: Point = .{ .x = 1, .y = 2 };`
+
+## 21. `&` on a slice expression is an error (0.17)
+
+Slicing a local array and prefixing it with `&` — a natural
+"pointer into the array" habit — does not parse as you expect:
+
+```zig
+var msg: [128]u8 = undefined;
+var o: usize = 32;
+copyStr(&msg[o..], "|");
+// .zig: error: expected array of 'u8', found '[]u8'
+```
+
+`msg[o..]` is already a value (a slice header); `&` of it is not a way to
+get the underlying bytes. Verified working forms:
+
+```zig
+copyStr(msg[o..], "|");  // the bare slice — usually what was wanted
+const x = (&msg)[o..];   // parens first: slice the array's pointer
+```
+
+When a raw pointer into the array is genuinely required (a C-API parameter
+such as `[*:0]const u8`), slice first and take `.ptr`: `msg[o..].ptr`..
