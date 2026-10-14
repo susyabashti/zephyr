@@ -185,6 +185,61 @@ the current week, Monday–Sunday).
   macOS, CPU elsewhere. The build can skip the engine entirely
   (`zig build -Dno-embed=true`); then the vector surface reports
   `EngineUnavailable`.
+
+## Model management
+
+**Fetch** — `zephyr model fetch [--force]`
+
+- Downloads the pinned model from the pinned Hugging Face URL and installs
+  it at the resolved location. The bytes stream to `<path>.tmp`; the file is
+  checked against the pinned size and sha256; only then is it renamed into
+  place. Any failure removes the temporary file, so an interrupted download
+  never leaves a half file at the model path.
+- A file that already matches the pin is left alone (one `model: ok …` line);
+  a wrong-size or corrupt file is replaced. `--force` re-downloads even when
+  verified. Progress: `model: downloading embeddinggemma-300M-Q8_0.gguf
+  (313 MiB) from huggingface.co`, then `model: ok (sha256 verified) at PATH`.
+- Honors the standard proxy environment variables (`https_proxy` and
+  friends). Works in `--no-embed` builds too (pre-fetch for a later full
+  build).
+
+**Status** — `zephyr model status`
+
+- Prints the resolved path (`$ZEPHYR_EMBED_MODEL` wins over the default;
+  a relative env value is resolved against the cwd), a `source:` line when
+  the env variable is set, and one of: `status: ok (N bytes, sha256
+  verified)`, `status: invalid (N bytes, expected M) (run: zephyr model
+  fetch)`, or `status: missing (run: zephyr model fetch)`.
+
+**Auto-fetch**
+
+- The first `rank --mode vector|hybrid` or `derived rebuild --embeddings`
+  whose model path is the *default* location auto-downloads a missing or
+  wrong-size model, then continues as if it had been there. A
+  `$ZEPHYR_EMBED_MODEL` path is never populated automatically.
+- The pre-check is a stat, not a hash: a size-matching file is left to the
+  engine's own load-time hash gate (which re-hashes the model on every
+  load), so the common path pays no extra read of a 313 MiB file.
+- A failed auto-fetch fails the command with an actionable line (network
+  check, `zephyr model fetch`); the download itself is sha256-verified
+  before install, so a tampered response can never become the model.
+
+## Distribution
+
+- **`install.sh`** (repo root) installs a release: detects the
+  platform/target, resolves the version (first argument or `$ZEPHYR_VERSION`,
+  else the latest GitHub release), downloads the tarball and
+  `sha256sums.txt` from the release, verifies the sha256, and installs the
+  binary to `$ZEPHYR_INSTALL_DIR` (default `~/.local/bin`, with a PATH
+  warning). Nothing is installed before verification succeeds.
+- **GitHub Releases** are produced by the release workflow on a `v*` tag:
+  ReleaseFast builds for darwin-arm64, darwin-x64, linux-x64, and
+  linux-arm64, one `zephyr-<version>-<target>.tar.gz` per target (the
+  binary only) plus `sha256sums.txt`. See [releases.md](releases.md).
+- **CI** runs on every PR and on pushes to main: build (ReleaseFast), unit
+  + phase tests, format check, and the five byte-exact gates on macOS and
+  Linux (x64 and ARM); the retrieval eval (real model) and the 100k round
+  trip run on pushes to main.
 - The artifact (`derived/embed.zde`, ZDE1) stores per-entry vectors with
   the log head, the model hash, and the engine id; a mismatch of any of
   the three means "stale", and no command serves stale vectors.

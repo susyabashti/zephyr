@@ -6,7 +6,19 @@ Log in one command, in about three seconds. The journal is an append-only, hash-
 
 No network is required to log. Everything an AI reads is an explicit action, and every AI-facing output carries the provenance of the verified log state it was read from.
 
-## Build
+## Install
+
+One line, from a [release](https://github.com/susyabashti/zephyr/releases):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/susyabashti/zephyr/main/install.sh | sh
+```
+
+The installer detects your platform, downloads the matching tarball, verifies it against the published `sha256sums.txt`, and installs the binary to `~/.local/bin` (override with `$ZEPHYR_INSTALL_DIR`). Pin a version with `ZEPHYR_VERSION=v0.2.1` or `sh install.sh v0.2.1`. Supported targets: macOS (Apple Silicon and Intel) and Linux (x86-64 and ARM64).
+
+Upgrading is the same one line: everything the CLI keeps (journal, model, keys) lives in your home directory, so the install is a single-file replacement.
+
+### Build from source
 
 Requires **Zig 0.17**. The default build compiles a pinned llama.cpp as a native static library (the local embedding engine), which needs **cmake** and **ninja** installed. On macOS it enables Metal; elsewhere it uses CPU.
 
@@ -62,6 +74,11 @@ zephyr derived status|rebuild     inspect or force-rebuild the
 zephyr rank <query...> [--mode keyword|vector|hybrid]
                                   [--top N]  ranked retrieval;
                                   default: hybrid, top 10
+zephyr model fetch [--force]     download the pinned embedding
+                                  model (auto-downloaded on first
+                                  use of the embedding surface)
+zephyr model status             where the model lives, and
+                                  whether it matches the pin
 zephyr edit <seq> [-t TAG]... "text"
                                   amend an entry (tags kept unless
                                   -t is given)
@@ -121,23 +138,27 @@ Environment variables: `ZEPHYR_HOME` (journal directory), `ZEPHYR_KEY` (checkpoi
 
 `rank`, hybrid `ask`, and `derived rebuild --embeddings` use a small embedding model that runs fully locally: **EmbeddingGemma-300M, Q8_0** — 328,577,056 bytes, SHA-256 `a0f7b4e13c397a6e1b32c2de75b1f65a14c92ec524d5f674d94a4290a1c4969b`, linked in via the pinned llama.cpp submodule (Metal on macOS, CPU elsewhere).
 
-Download it once (or point `$ZEPHYR_EMBED_MODEL` at any file you have):
+The model downloads itself: the first `rank --mode vector|hybrid` or `derived rebuild --embeddings` at the default location fetches the pinned file (~313 MiB), verifies its sha256, and installs it to `~/.zephyr/models/` — the file is only ever put in place after verification, and an interrupted download never leaves a half file behind. Manage it explicitly any time:
 
 ```sh
-mkdir -p ~/.zephyr/models
-curl -L -o ~/.zephyr/models/embeddinggemma-300M-Q8_0.gguf \
-  https://huggingface.co/unsloth/embeddinggemma-300M-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf
+zephyr model fetch            # download if missing or corrupt; no-op if verified
+zephyr model fetch --force    # re-download even when verified
+zephyr model status           # path, and whether it matches the pin
 ```
 
-Then build the vector artifact:
+Prefer your own copy? Point `$ZEPHYR_EMBED_MODEL` at the file — a custom path is never populated automatically.
+
+Then build the vector artifact (auto-fetch happens here too):
 
 ```sh
 zephyr derived rebuild --embeddings
 ```
 
-Without the model, `rank --mode vector|hybrid` fails with `EmbeddingsUnavailable` and tells you where to put the model; `rank --mode keyword` (and every other command) works with no model at all.
+Without the artifact, `rank --mode vector|hybrid` fails with `EmbeddingsUnavailable` and tells you what to run; `rank --mode keyword` (and every other command) works with no model at all.
 
 ## Development
+
+If you have [`just`](https://github.com/casey/just), the [justfile](justfile) covers the common tasks (`just build`, `just test`, `just gates`, `just install-local`, `just release`…). Directly:
 
 ```sh
 zig build             # build the CLI (+ llama.cpp static library)
@@ -157,3 +178,16 @@ python3 test/semref.py --check       # semantic layer (add --eval for the retrie
 ```
 
 The plan, threat model, and phase breakdown live in [docs/plan.md](docs/plan.md); the layer diagram in [docs/architecture.html](docs/architecture.html).
+
+## Releasing
+
+Releasing is a tag push — the [release workflow](.github/workflows/release.yml) builds ReleaseFast binaries for all four targets (macOS arm64/x64, Linux x64/arm64), packages tarballs, publishes `sha256sums.txt`, and uploads everything to the GitHub release:
+
+```sh
+# 1. on a clean, tested tree: bump cli.Version in src/cli/cli.zig to X.Y.Z
+git commit -am "release: vX.Y.Z"
+git tag vX.Y.Z
+git push origin main vX.Y.Z
+```
+
+The first tag of the day doubles as the CI smoke test for the release path. Full procedure, the artifact layout, and how users verify checksums: [docs/releases.md](docs/releases.md).

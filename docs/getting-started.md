@@ -1,28 +1,37 @@
 # Getting started
 
-A first run with zephyr, end to end: build, log, read, verify, set up the
+A first run with zephyr, end to end: install, log, read, verify, enable the
 local embedding model, and hand the journal to an AI.
-
-## Prerequisites
-
-- **Zig 0.17** (`zig version`).
-- For the default build (with semantic search): **cmake** and **ninja**.
-  Without them, build with `zig build -Dno-embed=true` — everything works
-  except `rank`/`ask` vector modes.
-- Optional: a Python 3 stdlib-only environment, for the reference gates and
-  for OpenTimestamps tooling if you want external proofs.
 
 Your data lives in one directory: `~/.local/share/zephyr` by default.
 Override it with `$ZEPHYR_HOME` or `--journal PATH`.
 
-## 1. Build
+## 1. Install
+
+The one-liner installs the latest [release](https://github.com/susyabashti/zephyr/releases)
+(darwin-arm64 / darwin-x64 / linux-x64 / linux-arm64):
 
 ```sh
-zig build
+curl -fsSL https://raw.githubusercontent.com/susyabashti/zephyr/main/install.sh | sh
 ```
 
-The first build compiles the pinned llama.cpp embedding engine (a few
-minutes); later builds are fast. The binary is `zig-out/bin/zephyr`.
+It verifies the tarball against the published `sha256sums.txt` and installs
+to `~/.local/bin`. Pin a version with `ZEPHYR_VERSION=v0.2.1` in the
+environment (or `sh install.sh v0.2.1`); change the target directory with
+`$ZEPHYR_INSTALL_DIR`.
+
+**Prefer to build from source?** Requires **Zig 0.17**, plus **cmake** and
+**ninja** for the default build (the local embedding engine). Without them,
+`zig build -Dno-embed=true` works and everything except `rank`/`ask` vector
+modes is available:
+
+```sh
+zig build            # the binary is zig-out/bin/zephyr
+just install-local   # …or, with just: ReleaseFast build into ~/.local/bin
+```
+
+An optional Python 3 stdlib-only environment is needed only for the
+reference gates and for OpenTimestamps tooling.
 
 ## 2. Log and read
 
@@ -65,35 +74,37 @@ exact record, field, and detail of any break — and exits non-zero. Every
 other command verifies before it trusts the journal, so a corrupted log
 refuses to serve instead of serving stale data.
 
-## 4. Set up semantic search (optional)
+## 4. Enable semantic search (optional)
 
 `rank` and hybrid `ask` embed entries with a small local model
 (**EmbeddingGemma-300M, Q8_0**, about 313 MiB — everything stays on the
-machine). Download the pinned file once:
-
-```sh
-mkdir -p ~/.zephyr/models
-curl -L -o ~/.zephyr/models/embeddinggemma-300M-Q8_0.gguf \
-  https://huggingface.co/unsloth/embeddinggemma-300M-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf
-```
-
-Check it (the pin is in `src/embed/model.zig`):
-
-```sh
-shasum -a 256 ~/.zephyr/models/embeddinggemma-300M-Q8_0.gguf
-# expect a0f7b4e13c397a6e1b32c2de75b1f65a14c92ec524d5f674d94a4290a1c4969b
-```
-
-Need it somewhere else? Point `$ZEPHYR_EMBED_MODEL` at the file.
-
-Build the vector artifact (this loads the model and embeds every visible
-entry once). It is bound to the log's head and to the model: a new entry,
-or a different model or engine, makes it stale — vector/hybrid `rank`
-then refuses and tells you exactly what to run:
+machine). There is nothing to set up: the first time the embedding surface
+is used, zephyr downloads the pinned file, verifies its sha256 against the
+pin in `src/embed/model.zig`, and installs it to
+`~/.zephyr/models/embeddinggemma-300M-Q8_0.gguf`. You'll see:
 
 ```sh
 zephyr derived rebuild --embeddings
+# rebuilt: 42 words, 3 entities (digests regenerate on demand)
+# model: downloading embeddinggemma-300M-Q8_0.gguf (313 MiB) from huggingface.co
+# model: ok (sha256 verified) at ~/.zephyr/models/embeddinggemma-300M-Q8_0.gguf
+# embeddings: 17 entries, 3072 bytes/entry (derived/embed.zde)
 ```
+
+Prefer to manage the model yourself? It is a normal command:
+
+```sh
+zephyr model fetch            # download if missing or corrupt; no-op if verified
+zephyr model fetch --force    # re-download even when verified
+zephyr model status           # path, size, and whether it matches the pin
+```
+
+Need a different file? Point `$ZEPHYR_EMBED_MODEL` at it — a custom path is
+never populated automatically.
+
+The vector artifact is built by the same command and bound to the log's
+head and to the model: a new entry, or a different model or engine, makes it
+stale — vector/hybrid `rank` then refuses and tells you exactly what to run.
 
 Then use it:
 
