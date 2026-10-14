@@ -19,6 +19,24 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // Phase 8: the embedding engine. Default build: the pinned llama.cpp
+    // submodule is configured and built with cmake and linked statically
+    // into the CLI. --no-embed skips all of it; the embedding surface then
+    // reports EngineUnavailable while everything else works. `zig build
+    // test` never needs the engine (the core-side tests use a
+    // deterministic fake).
+    const embed_enabled = !(b.option(bool, "no-embed", "build without the embedding engine (Phase 8)") orelse false);
+    const embed_options = b.addOptions();
+    embed_options.addOption(bool, "has_embed", embed_enabled);
+    const embed = b.createModule(.{
+        .root_source_file = b.path("src/embed.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "zephyr_core", .module = core },
+            .{ .name = "embed_options", .module = embed_options.createModule() },
+        },
+    });
+
     const exe = b.addExecutable(.{
         .name = "zephyr",
         .root_module = b.createModule(.{
@@ -28,10 +46,72 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "zephyr_core", .module = core },
                 .{ .name = "zephyr_mcp", .module = mcp },
+                .{ .name = "zephyr_embed", .module = embed },
             },
         }),
     });
     b.installArtifact(exe);
+
+    if (embed_enabled) {
+        // Native build of the pinned submodule (b11609): static library,
+        // no tools/tests/examples, Metal on Apple Silicon, CPU elsewhere.
+        const metal_flag = std.fmt.allocPrint(b.graph.arena, "-DGGML_METAL={s}", .{if (target.result.os.tag == .macos) "ON" else "OFF"}) catch
+            @panic("OOM");
+        // Apple Silicon: with GGML_NATIVE on (the default), ggml-cpu runs
+        // the ARM feature probes via check_cxx_source_runs — the SVE and
+        // SME probes compile, but their binaries never terminate on macOS
+        // arm64 (the first SVE instruction faults into a spin instead of
+        // killing the process), so cmake hangs forever. Pre-seed the check
+        // variables: check_* skips a probe already in the cache, and the
+        // fallback then builds with +nosve/+nosme, which is what Apple
+        // silicon needs anyway. (dotprod/i8mm probes exit cleanly and run.)
+        const base_args = [_][]const u8{
+            "cmake",                   "-G",                         "Ninja",
+            "-S",                      "third_party/llama.cpp",      "-B",
+            "zig-out/llama",           "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=OFF",
+            metal_flag,                "-DLLAMA_BUILD_COMMON=OFF",   "-DLLAMA_BUILD_TESTS=OFF",
+            "-DLLAMA_BUILD_TOOLS=OFF", "-DLLAMA_BUILD_EXAMPLES=OFF", "-DLLAMA_BUILD_SERVER=OFF",
+            "-DLLAMA_BUILD_APP=OFF",
+        };
+        var configure_args = std.ArrayList([]const u8).empty;
+        for (base_args) |a| configure_args.append(b.graph.arena, a) catch @panic("OOM");
+        if (target.result.cpu.arch == .aarch64 and target.result.os.tag == .macos) {
+            configure_args.append(b.graph.arena, "-DGGML_MACHINE_SUPPORTS_sve=0") catch @panic("OOM");
+            configure_args.append(b.graph.arena, "-DGGML_MACHINE_SUPPORTS_sme=0") catch @panic("OOM");
+        }
+        const llama_configure = b.addSystemCommand(configure_args.items);
+        const llama_build = b.addSystemCommand(&.{
+            "cmake", "--build", "zig-out/llama", "--target", "llama",
+        });
+        llama_build.step.dependOn(&llama_configure.step);
+
+        // The engine module links the static library set. The order is the
+        // pinned build's own CMake dependency graph (zig-out/llama/
+        // llama-config.cmake and ggml/ggml-config.cmake): llama -> ggml ->
+        // ggml-base -> every built backend; ld64 resolves static archives
+        // left to right, so this order is load-bearing. The archives live
+        // in the cmake build tree (only libllama.a is "installed"). This
+        // list matches the macOS build (Metal + Accelerate/BLAS on);
+        // -Dno-embed=true remains the build path for other platforms.
+        const llama_libs = [_][]const u8{ "llama", "ggml", "ggml-base", "ggml-cpu", "ggml-blas", "ggml-metal" };
+        embed.addLibraryPath(b.path("zig-out/llama/src"));
+        embed.addLibraryPath(b.path("zig-out/llama/ggml/src"));
+        embed.addLibraryPath(b.path("zig-out/llama/ggml/src/ggml-blas"));
+        embed.addLibraryPath(b.path("zig-out/llama/ggml/src/ggml-metal"));
+        for (llama_libs) |name| {
+            embed.linkSystemLibrary(name, .{ .use_pkg_config = .no, .preferred_link_mode = .static });
+        }
+        // Runtime dependencies: libstdc++ (llama.cpp is C++) and the
+        // frameworks the built backends need.
+        embed.linkSystemLibrary("c++", .{});
+        if (target.result.os.tag == .macos) {
+            embed.linkFramework("Accelerate", .{});
+            embed.linkFramework("Metal", .{});
+            embed.linkFramework("MetalKit", .{});
+            embed.linkFramework("Foundation", .{});
+        }
+        exe.step.dependOn(&llama_build.step);
+    }
 
     const run_step = b.step("run", "Run the app");
     const run_cmd = b.addRunArtifact(exe);
@@ -143,6 +223,19 @@ pub fn build(b: *std.Build) void {
     const phase7_tests = b.addTest(.{ .root_module = phase7_module });
     const run_phase7_tests = b.addRunArtifact(phase7_tests);
 
+    // Phase 8: semantic layer gates (ZDE1 layout, rebuild determinism,
+    // staleness, visible-only, fusion exactness) with a deterministic fake
+    // engine; never links llama.cpp.
+    const phase8_module = b.createModule(.{
+        .root_source_file = b.path("test/phase8.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "zephyr_core", .module = core },
+        },
+    });
+    const phase8_tests = b.addTest(.{ .root_module = phase8_module });
+    const run_phase8_tests = b.addRunArtifact(phase8_tests);
+
     // Phase 5b: OpenTimestamps proof format (pinned vectors + corruption
     // suite), and the stamp/verify/redaction gates on an on-disk journal.
     const ots_module = b.createModule(.{
@@ -193,6 +286,8 @@ pub fn build(b: *std.Build) void {
         "src/core/dstore.zig",
         // Phase 6: pure wire protocol (self-contained; no core imports).
         "src/mcp/protocol.zig",
+        // Phase 8: the C binding's layout tests (no engine link needed).
+        "src/embed/llama.zig",
     };
     for (core_test_files) |path| {
         const module = b.createModule(.{
@@ -213,6 +308,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_phase5b_tests.step);
     test_step.dependOn(&run_phase6_tests.step);
     test_step.dependOn(&run_phase7_tests.step);
+    test_step.dependOn(&run_phase8_tests.step);
 
     const fmt_step = b.step("fmt", "Run format checks");
     fmt_step.dependOn(&b.addFmt(.{ .paths = b.pathList(&.{ "src", "test", "build.zig" }) }).step);

@@ -1,0 +1,48 @@
+{
+  "format_version": 1,
+  "description": "Phase 8 evaluation gate (spec/semantic.md section 8): 12 labeled queries over the fixture journal below. 4 synonym/paraphrase, 3 typo/plural/morphology, 2 date, 2 tag, 1 multi-entry. Frozen bytes: this file plus test/semref.py's loader define the gate; the journal is rendered from it with test/reference.py. Loader contract: seq is assigned by position starting at 0; timestamp_ms = base_ms + offset_ms; tz_offset_min is 0; salt_hex is format(seq, \"064x\"); private and target_seq default to false and 0. 19 records; visible entries 17; visible non-redacted (embeddable) 16: seqs 0,1,3,4,5,6,8,10,11,12,13,14,15,16,17,18.",
+  "base_ms": 1767225600000,
+  "fixture": {
+    "segments": [
+      {
+        "name": "2026-01.zph",
+        "sealed": false,
+        "records": [
+          { "type": "entry", "text": "new year kickoff: shipped the auth fix", "tags": ["work"], "offset_ms": 3600000 },
+          { "type": "entry", "text": "reviewed Berlin notes with Alice", "tags": [], "offset_ms": 7200000 },
+          { "type": "entry", "text": "sensitive meeting notes", "tags": ["sensitive"], "offset_ms": 10800000 },
+          { "type": "entry", "text": "walked the dog in the rain", "tags": [], "offset_ms": 14400000 },
+          { "type": "entry", "text": "updated the deploy pipeline docs", "tags": ["work"], "offset_ms": 18000000 },
+          { "type": "entry", "text": "called Mom about the move", "tags": [], "offset_ms": 21600000 },
+          { "type": "entry", "text": "fixed the login timeout bug", "tags": ["work"], "offset_ms": 25200000 },
+          { "type": "entry", "text": "PRIVATE-P8-MARKER-8f2b", "tags": ["priv"], "offset_ms": 28800000, "private": true },
+          { "type": "entry", "text": "dog ate a sock, vet says it is fine", "tags": ["dog"], "offset_ms": 90000000 },
+          { "type": "redaction", "text": "", "tags": [], "offset_ms": 93600000, "target_seq": 2 },
+          { "type": "entry", "text": "Berlin trip tickets booked for April", "tags": ["berlin"], "offset_ms": 97200000 },
+          { "type": "entry", "text": "refactored the payment module", "tags": ["work"], "offset_ms": 100800000 },
+          { "type": "entry", "text": "started morning runs this week", "tags": ["health"], "offset_ms": 104400000 },
+          { "type": "entry", "text": "Alice and I planned the wedding playlist", "tags": [], "offset_ms": 108000000 },
+          { "type": "entry", "text": "garden tomatoes finally sprouted", "tags": ["home"], "offset_ms": 111600000 },
+          { "type": "entry", "text": "deployed v2.3 to production on the third", "tags": ["work"], "offset_ms": 176400000 },
+          { "type": "entry", "text": "the dog learned a new trick", "tags": ["dog"], "offset_ms": 180000000 },
+          { "type": "entry", "text": "read a chapter of the Dune book", "tags": [], "offset_ms": 183600000 },
+          { "type": "entry", "text": "fixed the flaky tests in CI", "tags": ["work"], "offset_ms": 187200000 }
+        ]
+      }
+    ]
+  },
+  "queries": [
+    { "id": "synonym-1", "category": "synonym", "query": "what I released to the live servers", "gold": [15] },
+    { "id": "synonym-2", "category": "synonym", "query": "my cardio routine these days", "gold": [12] },
+    { "id": "synonym-3", "category": "synonym", "query": "the issue I solved with user sign-in", "gold": [6] },
+    { "id": "synonym-4", "category": "synonym", "query": "my vacation to Europe is set", "gold": [10] },
+    { "id": "typo-1", "category": "typo", "query": "walked the dgo in the rain", "gold": [3] },
+    { "id": "plural-1", "category": "plural", "query": "dogs", "gold": [3, 8, 16] },
+    { "id": "morphology-1", "category": "morphology", "query": "the deploy pipeline", "gold": [4] },
+    { "id": "date-1", "category": "date", "query": "what happened on the third", "gold": [15, 16, 17, 18] },
+    { "id": "date-2", "category": "date", "query": "bookings for the april trip", "gold": [10] },
+    { "id": "tag-1", "category": "tag", "query": "work stuff from january", "gold": [0, 4, 6, 11, 15, 18] },
+    { "id": "tag-2", "category": "tag", "query": "the dog entries", "gold": [3, 8, 16] },
+    { "id": "multi-1", "category": "multi", "query": "everything about the deployment", "gold": [4, 15] }
+  ]
+}

@@ -12,6 +12,8 @@
 const std = @import("std");
 const core = @import("zephyr_core");
 const mcp = @import("zephyr_mcp");
+const embed_mod = @import("zephyr_embed");
+const rank = @import("rank.zig");
 
 const Io = std.Io;
 const File = Io.File;
@@ -36,7 +38,8 @@ pub const RunError = error{
     core.ots.VerifyError ||
     core.view.RenderError || core.dstore.PackError || core.dstore.StatusError ||
     core.dstore.RebuildError || File.OpenError || File.Writer.Error || std.Io.Reader.ShortError ||
-    std.crypto.errors.IdentityElementError || std.process.CurrentPathError || mcp.server.RunError;
+    std.crypto.errors.IdentityElementError || std.process.CurrentPathError || mcp.server.RunError ||
+    rank.RankError; // Phase 8: the embedding surface (rank, ask hybrid, derived rebuild --embeddings)
 
 pub fn run(init: std.process.Init, args: []const []const u8) RunError!void {
     const io = init.io;
@@ -99,6 +102,8 @@ pub fn run(init: std.process.Init, args: []const []const u8) RunError!void {
             try runProfile(arena, io, err_file, out, init.environ_map, path);
         } else if (std.mem.eql(u8, command, "derived")) {
             try runDerived(arena, io, err_file, out, init.environ_map, path, rest);
+        } else if (std.mem.eql(u8, command, "rank")) {
+            try rank.run(arena, io, err_file, out, init.environ_map, path, rest);
         } else if (std.mem.eql(u8, command, "edit")) {
             try runEdit(arena, io, err_file, out, init.environ_map, path, rest);
         } else if (std.mem.eql(u8, command, "rm")) {
@@ -133,7 +138,7 @@ fn isCommand(s: []const u8) bool {
         std.mem.eql(u8, s, "rm") or std.mem.eql(u8, s, "redact") or
         std.mem.eql(u8, s, "checkpoint") or std.mem.eql(u8, s, "export") or
         std.mem.eql(u8, s, "ots-stamp") or std.mem.eql(u8, s, "ots-export") or
-        std.mem.eql(u8, s, "mcp");
+        std.mem.eql(u8, s, "mcp") or std.mem.eql(u8, s, "rank");
 }
 
 // ---------------------------------------------------------------- log
@@ -283,7 +288,38 @@ fn runAsk(
     // Period: the explicit range, else a YYYY-MM-DD in the question, else
     // the current week (spec/derived.md section 7, step 4).
     const pack_range = try core.dstore.resolveRange(io, &journal, range, question);
-    const pack = try core.dstore.contextPack(arena, &journal, &visible, result, question, pack_range, true);
+    // Hybrid retrieval when the vector artifact is fresh and the model is
+    // available; any failure degrades silently to the keyword list
+    // (spec/semantic.md section 6) — `ask` never fails over embeddings.
+    var hybrid: ?core.dstore.Hybrid = null;
+    const embed_store = try core.dstore.loadFreshEmbed(arena, &journal, result);
+    if (embed_store) |store| {
+        defer store.deinit();
+        const model_path = embed_mod.model.resolveModelPath(arena, environ_map) catch null;
+        if (model_path) |p| {
+            const engine = embed_mod.create(arena, io, p) catch null;
+            if (engine) |e| {
+                defer e.deinit();
+                // An artifact built under a different model or engine is
+                // stale, never served: degrade to the keyword list.
+                if (core.embed.matchesEngine(&store, e)) {
+                    const vectors = e.embed(arena, &.{question}, .query) catch null;
+                    if (vectors) |vs| {
+                        defer {
+                            for (vs) |v| arena.free(v);
+                            arena.free(vs);
+                        }
+                        // Copy the query vector: its lifetime must not ride on
+                        // the engine's per-call allocation.
+                        const qv = try arena.alloc(f32, vs[0].len);
+                        @memcpy(qv, vs[0]);
+                        hybrid = .{ .store = &store, .query = qv };
+                    }
+                }
+            }
+        }
+    }
+    const pack = try core.dstore.contextPack(arena, &journal, &visible, result, question, pack_range, true, hybrid);
     try printBlock(out, io, pack);
 }
 
@@ -362,17 +398,22 @@ fn runDerived(
     path: []const u8,
     rest: []const []const u8,
 ) RunError!void {
-    if (rest.len != 1) return error.Usage;
+    if (rest.len == 0 or rest.len > 2) return error.Usage;
     const journal = try openReadJournal(arena, io, err_file, environ_map, path);
     defer journal.close();
     const result = try verifyOrReport(arena, io, err_file, &journal);
-    if (std.mem.eql(u8, rest[0], "status")) {
+    if (rest.len == 1 and std.mem.eql(u8, rest[0], "status")) {
         var report = try core.dstore.artifactStatus(arena, &journal, result);
         defer report.deinit();
         for (report.items) |a| {
             try printLine(out, io, try renderStatusLine(arena, a));
         }
     } else if (std.mem.eql(u8, rest[0], "rebuild")) {
+        // `rebuild --embeddings` also builds the vector artifact (it loads
+        // the model); without the flag, embed.zde is never touched
+        // (spec/semantic.md section 7).
+        const with_embeddings = rest.len == 2 and std.mem.eql(u8, rest[1], "--embeddings");
+        if (rest.len == 2 and !with_embeddings) return error.Usage;
         const recs = try journal.collectRecords(arena);
         defer recs.deinit();
         const visible = try core.view.visibleEntries(arena, recs.headers, recs.payloads);
@@ -382,18 +423,45 @@ fn runDerived(
             "rebuilt: {d} words, {d} entities (digests regenerate on demand)",
             .{ counts.word_count, counts.entity_count },
         ));
+        if (with_embeddings) {
+            const model_path = try rank.resolveModelPathOrReport(arena, io, err_file, environ_map);
+            const engine = embed_mod.create(arena, io, model_path) catch |err| {
+                try rank.reportEmbedError(arena, io, err_file, model_path, err);
+                return err;
+            };
+            defer engine.deinit();
+            const ec = try core.dstore.rebuildEmbeddings(arena, &journal, &visible, result, engine);
+            try printLine(out, io, try arena.print(
+                "embeddings: {d} entries, {d} bytes/entry (derived/embed.zde)",
+                .{ ec.chunk_count, ec.bytes_per_entry },
+            ));
+        }
     } else {
         return error.Usage;
     }
 }
 
 fn renderStatusLine(arena: Allocator, a: core.dstore.Artifact) Allocator.Error![]const u8 {
-    const head = if (a.head) |h| try hexOf(arena, &h) else "-";
-    var line = try arena.print("{s}  head={s}", .{ a.name, head });
-    if (a.version) |v| {
-        const extra = try arena.print("  v{d}  {d} records", .{ v, a.record_count.? });
-        line = try arena.print("{s}{s}", .{ line, extra });
-    }
+    // The embedding artifact carries its own digests (spec/semantic.md
+    // section 7): hex12 head, model, and engine plus the dimension.
+    const line = if (a.dim != null) blk: {
+        const head = if (a.head) |h| try hex12Of(arena, &h) else "-";
+        const model = if (a.model_hash) |m| try hex12Of(arena, &m) else "-";
+        const engine = if (a.engine_id) |e| try hex12Of(arena, &e) else "-";
+        const records = if (a.record_count) |r| r else 0;
+        break :blk try arena.print(
+            "{s}  head={s}  dim={d}  model={s}  engine={s}  records={d}",
+            .{ a.name, head, a.dim.?, model, engine, records },
+        );
+    } else blk: {
+        const head = if (a.head) |h| try hexOf(arena, &h) else "-";
+        var l = try arena.print("{s}  head={s}", .{ a.name, head });
+        if (a.version) |v| {
+            const extra = try arena.print("  v{d}  {d} records", .{ v, a.record_count.? });
+            l = try arena.print("{s}{s}", .{ l, extra });
+        }
+        break :blk l;
+    };
     const state = switch (a.state) {
         .fresh => "fresh",
         .stale => "stale",
@@ -1163,8 +1231,15 @@ fn printUsage(file: File, io: Io) File.Writer.Error!void {
         \\  zephyr recap [start..end]         period digest (default: the
         \\                                   current week, Mon-Sun)
         \\  zephyr profile                    derived profile plus notes.md
-        \\  zephyr derived status|rebuild     inspect or force-rebuild the
-        \\                                   derived artifacts
+        \\\  zephyr derived status|rebuild     inspect or force-rebuild the
+        \\\                                   derived artifacts; `rebuild
+        \\\                                   --embeddings` also builds the
+        \\\                                   vector artifact (loads the model)
+        \\\  zephyr rank <query...> [--mode keyword|vector|hybrid]
+        \\\                                   [--top N]  ranked retrieval;
+        \\\                                   default: hybrid, top 10. Vector
+        \\\                                   and hybrid need the fresh
+        \\\                                   embedding artifact
         \\  zephyr edit <seq> [-t TAG]... "text"
         \\                                   amend an entry (tags kept unless
         \\                                   -t is given)
@@ -1203,6 +1278,18 @@ fn hexOf(allocator: Allocator, hash: []const u8) Allocator.Error![]const u8 {
     const digits = "0123456789abcdef";
     const out = try allocator.alloc(u8, hash.len * 2);
     for (hash, 0..) |b, i| {
+        out[i * 2] = digits[b >> 4];
+        out[i * 2 + 1] = digits[b & 0x0F];
+    }
+    return out;
+}
+
+/// The first six bytes as twelve lowercase hex digits (status lines only;
+/// spec/semantic.md section 7).
+fn hex12Of(allocator: Allocator, hash: []const u8) Allocator.Error![]const u8 {
+    const digits = "0123456789abcdef";
+    const out = try allocator.alloc(u8, 12);
+    for (hash[0..6], 0..) |b, i| {
         out[i * 2] = digits[b >> 4];
         out[i * 2 + 1] = digits[b & 0x0F];
     }

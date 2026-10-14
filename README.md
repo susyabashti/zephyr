@@ -329,6 +329,14 @@ Every phase has a deliverable and a pass/fail gate. Do not start the next phase 
 
 - On a small labeled query set it beats keyword search by a margin you set in advance. Otherwise, skip it.
 
+**Status (implemented — spec/semantic.md)**
+
+- Engine: llama.cpp b11609 (`fcac190`) as a pinned submodule, built with cmake and linked statically (`zig build -Dno-embed=true` builds without it). Model: the pinned EmbeddingGemma-300M Q8_0 GGUF at `~/.zephyr/models/` or `$ZEPHYR_EMBED_MODEL`, size- and hash-verified on load.
+- Artifact: `derived/embed.zde` (ZDE1, `derived rebuild --embeddings`); a missing, stale, or engine-mismatched artifact degrades retrieval to the Phase 7 keyword behavior — reads never rebuild.
+- Commands: `zephyr rank <query...> [--mode keyword|vector|hybrid] [--top N]`; `ask` uses the hybrid list when the artifact is fresh and degrades silently otherwise; the MCP server stays keyword-only.
+- Offline gates (green): `zig build test` (ZDE1 layout, rebuild determinism, staleness, visible-only, RRF exactness — deterministic fake engine) and `test/semref.py --check` (independent Python ZDE1 encoder; byte-exact `derived status`, `rank --mode keyword`, and ask-degrade bytes over the labeled fixture).
+- Evaluation gate (spec section 8, pre-committed): `test/semref.py --eval` on `spec/vectors/embed-labeled.json` (12 labeled queries) with the real model — hybrid must beat keyword by ≥ 0.2 Recall@5, with better MRR and no top-5 gold regressions. **PASS**: keyword 0.354 Recall@5 / 0.417 MRR vs hybrid 0.944 / 1.000 (margin 0.590, no top-5 regressions). Pooling A/B: mean 0.944 / 1.000 vs last-token 0.910 / 0.938 — **mean frozen** (spec section 4).
+
 ---
 
 ## 11. Decisions

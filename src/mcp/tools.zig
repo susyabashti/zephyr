@@ -347,8 +347,10 @@ fn getContext(arena: Allocator, io: Io, journal: *const journal_mod.Journal, que
     defer visible.deinit();
     // The server is read-only: the pack is computed in memory (persist =
     // false); the CLI's ask/derived commands are the persisting surface.
+    // Hybrid retrieval is unavailable here: the server never loads a model
+    // (spec/semantic.md section 6), so retrieval stays keyword-only.
     const pack_range = try core.dstore.resolveRange(io, journal, range, question);
-    const pack = try core.dstore.contextPack(arena, journal, &visible, v.result, question, pack_range, false);
+    const pack = try core.dstore.contextPack(arena, journal, &visible, v.result, question, pack_range, false, null);
     return Outcome{ .text = pack, .is_error = false };
 }
 

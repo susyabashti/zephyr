@@ -8,6 +8,11 @@ pub fn main(init: std.process.Init) !void {
         // cli.run already printed the details.
         error.Usage, error.TargetNotFound, error.TargetNotEntry, error.SegmentNotSealed => std.process.exit(2),
         error.VerifyFailed, error.JournalNotFound, error.BadOtsProof => std.process.exit(1),
+        // Phase 8: the embedding surface. Config/model-placement problems
+        // are the user's to act on (exit 2, like usage); engine failures
+        // are runtime faults (exit 1).
+        error.EmbeddingsUnavailable, error.EngineUnavailable, error.ModelNotFound, error.ModelMismatch => std.process.exit(2),
+        error.ModelLoadFailed, error.ContextInitFailed, error.DecodeFailed, error.SequenceTooLong => std.process.exit(1),
         else => {
             std.debug.print("zephyr: {s}\n", .{@errorName(err)});
             std.process.exit(1);

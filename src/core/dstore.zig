@@ -14,6 +14,7 @@ const journal_mod = @import("journal.zig");
 const derived = @import("derived.zig");
 const records = @import("records.zig");
 const search = @import("search.zig");
+const embed = @import("embed.zig");
 const segment = @import("segment.zig");
 const tokens = @import("tokens.zig");
 const timezone = @import("timezone.zig");
@@ -24,12 +25,22 @@ const Allocator = std.mem.Allocator;
 pub const DerivedDir = "derived";
 pub const DigestsDir = "derived/digests";
 pub const IndexFile = "derived/index.zdi";
+pub const EmbedFile = "derived/embed.zde";
 pub const ProfileFile = "profile.md";
 pub const NotesFile = "notes.md";
 pub const ProfileHeader = "# zephyr-profile: v1 ";
 
 /// Default cap on the pack's rendered match lines (spec/derived.md section 7).
 pub const PackMatchCap: usize = 8 << 10;
+
+/// Hybrid retrieval for the context pack (spec/semantic.md section 6): the
+/// fresh vector artifact and the query's L2-normalized vector. The store
+/// is borrowed for the call; it is never modified or rebuilt here. Null
+/// means "no vectors": the pack falls back to the Phase 7 keyword list.
+pub const Hybrid = struct {
+    store: *const embed.Store,
+    query: []const f32,
+};
 
 pub const IoError = Io.Dir.ReadFileAllocError || Io.Dir.CreateDirPathError || segment.WriteError;
 
@@ -83,6 +94,123 @@ pub fn saveIndex(allocator: Allocator, journal: *const journal_mod.Journal, idx:
     const bytes = try derived.encodeIndex(allocator, &idx);
     defer allocator.free(bytes);
     try segment.writeAtomic(journal.dir, journal.io, IndexFile, bytes);
+}
+
+// ---------------------------------------------------------------- embeddings
+
+pub const LoadEmbedError = Allocator.Error || Io.Dir.ReadFileAllocError || embed.DecodeError;
+
+/// The vector artifact when fresh (present, decodable with a valid footer,
+/// bound to `result.head`); null when missing, stale, or corrupt.
+/// Reads never rebuild — a build loads the model (spec/semantic.md
+/// section 5): a missing or stale artifact simply means "no vectors".
+pub fn loadFreshEmbed(
+    allocator: Allocator,
+    journal: *const journal_mod.Journal,
+    result: journal_mod.VerifyResult,
+) LoadEmbedError!?embed.Store {
+    const bytes = (try readJournalOrNull(allocator, journal, EmbedFile)) orelse return null;
+    defer allocator.free(bytes);
+    const store = embed.decode(allocator, bytes) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return null,
+    } orelse return null;
+    if (!std.mem.eql(u8, &store.head, &result.head)) {
+        store.deinit();
+        return null;
+    }
+    return store;
+}
+
+pub fn saveEmbed(journal: *const journal_mod.Journal, bytes: []const u8) IoError!void {
+    try Io.Dir.createDirPath(journal.dir, journal.io, DerivedDir);
+    try segment.writeAtomic(journal.dir, journal.io, EmbedFile, bytes);
+}
+
+pub const RebuildEmbedError = Allocator.Error || IoError || view.RenderError || embed.EmbedError;
+
+pub const RebuildEmbedCounts = struct {
+    chunk_count: usize,
+    bytes_per_entry: usize,
+};
+
+/// Builds `derived/embed.zde` (spec/semantic.md section 5): embeds the
+/// visible entries' view lines in seq order through `engine` and writes
+/// the artifact atomically. `engine` is borrowed; it is not deinited here.
+/// Redacted and private entries never enter a vector.
+pub fn rebuildEmbeddings(
+    allocator: Allocator,
+    journal: *const journal_mod.Journal,
+    visible: *const view.Visible,
+    result: journal_mod.VerifyResult,
+    engine: embed.Engine,
+) RebuildEmbedError!RebuildEmbedCounts {
+    // Embeddable entries (visible, non-redacted) in ascending seq order.
+    var idxs = try allocator.alloc(usize, visible.entries.len);
+    errdefer allocator.free(idxs);
+    var n: usize = 0;
+    for (visible.entries, 0..) |e, i| {
+        if (e.redacted) continue;
+        idxs[n] = i;
+        n += 1;
+    }
+    const order = idxs[0..n];
+    std.mem.sort(usize, order, visible, sortIdxBySeq);
+
+    var lines = std.ArrayList([]const u8).empty;
+    errdefer {
+        for (lines.items) |l| allocator.free(l);
+        allocator.free(lines.items);
+    }
+    for (order) |i| {
+        try lines.append(allocator, try view.entryLine(allocator, visible.entries[i]));
+    }
+
+    const dim = engine.dim();
+    const vectors = try engine.embed(allocator, lines.items, .document);
+    for (lines.items) |l| allocator.free(l);
+    allocator.free(lines.items);
+    lines.items = &.{};
+    lines.capacity = 0;
+    if (vectors.len != n) std.debug.panic("embed rebuild: the engine returned the wrong number of vectors", .{});
+
+    const seqs = try allocator.alloc(u64, n);
+    errdefer allocator.free(seqs);
+    for (seqs, order) |*s, i| s.* = visible.entries[i].seq;
+
+    var flat = try allocator.alloc(f32, n * dim);
+    errdefer allocator.free(flat);
+    var off: usize = 0;
+    for (vectors) |v| {
+        if (v.len != dim) std.debug.panic("embed rebuild: a vector has the wrong dimension", .{});
+        @memcpy(flat[off .. off + dim], v);
+        off += dim;
+    }
+    for (vectors) |v| allocator.free(v);
+    allocator.free(vectors);
+
+    var store = embed.Store{
+        .dim = dim,
+        .chunk_count = @intCast(n),
+        .model_hash = engine.modelHash(),
+        .engine_id = engine.identity(),
+        .head = result.head,
+        .record_count = result.record_count,
+        .seq_min = if (n > 0) seqs[0] else 0,
+        .seq_max = if (n > 0) seqs[n - 1] else 0,
+        .seqs = seqs,
+        .vectors = flat,
+        .allocator = allocator,
+    };
+    const bytes = try embed.encode(allocator, &store);
+    store.deinit(); // frees seqs and vectors
+    defer allocator.free(bytes);
+    try saveEmbed(journal, bytes);
+    return .{ .chunk_count = n, .bytes_per_entry = if (n > 0) bytes.len / n else 0 };
+}
+
+fn sortIdxBySeq(visible: *const view.Visible, a: usize, b: usize) bool {
+    return visible.entries[a].seq < visible.entries[b].seq;
 }
 
 // ---------------------------------------------------------------- digests
@@ -196,6 +324,7 @@ pub fn contextPack(
     question: []const u8,
     range: ?view.DayRange,
     persist: bool,
+    hybrid: ?Hybrid,
 ) PackError![]u8 {
     var parts = std.ArrayList([]const u8).empty;
     errdefer {
@@ -251,9 +380,15 @@ pub fn contextPack(
         try parts.append(allocator, digest);
     }
 
-    // 7. Keyword retrieval: question tokens (stopwords removed) through the
-    //    index; scoped to the period when one was resolved.
-    const matches = try retrieve(allocator, visible, &idx, question, range, result.record_count);
+    // 7. Retrieval: the hybrid (RRF) list when the vector artifact is
+    //    fresh, else the Phase 7 keyword list (spec/semantic.md section 6).
+    //    Same period scoping, same cap, same line format either way.
+    var matches: []search.Match = undefined;
+    if (hybrid) |h| {
+        matches = try hybridMatches(allocator, visible, &h, question, range);
+    } else {
+        matches = try retrieve(allocator, visible, &idx, question, range, result.record_count);
+    }
     if (matches.len > 0) {
         const rendered = try search.renderCapped(allocator, matches, question, PackMatchCap);
         allocator.free(matches);
@@ -275,6 +410,59 @@ pub fn contextPack(
     for (parts.items) |p| allocator.free(p);
     allocator.free(parts.items);
     return result_bytes;
+}
+
+/// The hybrid list for the context pack (spec/semantic.md section 6): RRF
+/// of the keyword hits and the stored vectors, scoped to the period, in
+/// fusion order. The line format and rendering are the Phase 7 ones.
+fn hybridMatches(
+    allocator: Allocator,
+    visible: *const view.Visible,
+    hybrid: *const Hybrid,
+    question: []const u8,
+    range: ?view.DayRange,
+) PackError![]search.Match {
+    const store = hybrid.store;
+    const kw = try embed.keywordHits(allocator, visible, question);
+    defer allocator.free(kw);
+    const kw_seqs = try seqList(allocator, kw);
+    defer allocator.free(kw_seqs);
+    const vec = try embed.cosineTopN(allocator, store.seqs, store.vectors, store.dim, hybrid.query, store.seqs.len);
+    defer allocator.free(vec);
+    const vec_seqs = try seqList(allocator, vec);
+    defer allocator.free(vec_seqs);
+    const fused = try embed.rrfFusion(allocator, kw_seqs, vec_seqs);
+    defer allocator.free(fused);
+
+    // seq -> entry: visible is in view order, not seq order.
+    var by_seq = std.array_hash_map.Auto(u64, *const view.ViewEntry).empty;
+    errdefer by_seq.deinit(allocator);
+    for (visible.entries) |*e| try by_seq.put(allocator, e.seq, e);
+
+    var matches = std.ArrayList(search.Match).empty;
+    errdefer matches.deinit(allocator);
+    for (fused) |hit| {
+        const e = by_seq.get(hit.seq) orelse continue;
+        if (e.redacted) continue;
+        if (range) |r| {
+            if (e.day < r.start or e.day >= r.end) continue;
+        }
+        try matches.append(allocator, .{
+            .seq = e.seq,
+            .day = e.day,
+            .ts_ms = e.ts_ms,
+            .tz_offset_min = e.tz_offset_min,
+            .text = e.text,
+            .tags = e.tags,
+        });
+    }
+    return matches.toOwnedSlice(allocator);
+}
+
+fn seqList(allocator: Allocator, hits: []const embed.RankHit) Allocator.Error![]u64 {
+    const out = try allocator.alloc(u64, hits.len);
+    for (out, hits) |*s, h| s.* = h.seq;
+    return out;
 }
 
 /// Question tokens (shared tokenizer, stopwords removed, deduplicated,
@@ -469,6 +657,11 @@ pub const Artifact = struct {
     /// index does not decode).
     version: ?u8,
     record_count: ?u64,
+    /// Embedding artifact only: vector dimension, model hash, and engine
+    /// identity digest (null for other artifacts or when undecodable).
+    dim: ?u32 = null,
+    model_hash: ?[32]u8 = null,
+    engine_id: ?[32]u8 = null,
 };
 
 pub const StatusReport = struct {
@@ -482,7 +675,8 @@ pub const StatusReport = struct {
     }
 };
 
-pub const StatusError = Allocator.Error || Io.Dir.ReadFileAllocError || Io.Dir.OpenError || Io.Dir.Iterator.Error;
+pub const StatusError = Allocator.Error || Io.Dir.ReadFileAllocError || Io.Dir.OpenError ||
+    Io.Dir.Iterator.Error || embed.DecodeError;
 
 /// One entry per stored artifact: the index, the profile, and each stored
 /// digest, in that order (digests sorted by name). `result` is the current
@@ -523,6 +717,72 @@ pub fn artifactStatus(
     } else {
         try items.append(allocator, .{
             .name = try allocator.dupe(u8, IndexFile),
+            .state = .missing,
+            .head = null,
+            .version = null,
+            .record_count = null,
+        });
+    }
+
+    // Embedding vectors: the header is parsed first, because `derived
+    // status` reports head-level staleness only (spec/semantic.md section
+    // 5) — an artifact whose recorded head no longer matches is stale, with
+    // its header fields echoed, even if the footer is broken. A matching
+    // head goes on to the full decode; anything that does not decode there
+    // is corrupt.
+    if (try readJournalOrNull(allocator, journal, EmbedFile)) |bytes| {
+        defer allocator.free(bytes);
+        if (embed.decodeHeader(bytes)) |h| {
+            if (std.mem.eql(u8, &h.head, &result.head)) {
+                const store = embed.decode(allocator, bytes) catch |err| switch (err) {
+                    error.OutOfMemory => return err,
+                    else => null,
+                };
+                if (store) |s| {
+                    defer s.deinit();
+                    try items.append(allocator, .{
+                        .name = try allocator.dupe(u8, "embed"),
+                        .state = .fresh,
+                        .head = s.head,
+                        .version = null,
+                        .record_count = s.record_count,
+                        .dim = s.dim,
+                        .model_hash = s.model_hash,
+                        .engine_id = s.engine_id,
+                    });
+                } else {
+                    try items.append(allocator, .{
+                        .name = try allocator.dupe(u8, "embed"),
+                        .state = .corrupt,
+                        .head = null,
+                        .version = null,
+                        .record_count = null,
+                    });
+                }
+            } else {
+                try items.append(allocator, .{
+                    .name = try allocator.dupe(u8, "embed"),
+                    .state = .stale,
+                    .head = h.head,
+                    .version = null,
+                    .record_count = h.record_count,
+                    .dim = h.dim,
+                    .model_hash = h.model_hash,
+                    .engine_id = h.engine_id,
+                });
+            }
+        } else {
+            try items.append(allocator, .{
+                .name = try allocator.dupe(u8, "embed"),
+                .state = .corrupt,
+                .head = null,
+                .version = null,
+                .record_count = null,
+            });
+        }
+    } else {
+        try items.append(allocator, .{
+            .name = try allocator.dupe(u8, "embed"),
             .state = .missing,
             .head = null,
             .version = null,

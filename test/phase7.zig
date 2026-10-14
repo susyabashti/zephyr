@@ -191,7 +191,7 @@ test "phase 7: rebuild is deterministic after deletion" {
     const question = "anything about auth?";
 
     var v1 = try visibleOf(allocator, f.journal);
-    const pack1 = try dstore.contextPack(allocator, f.journal, &v1.visible, v1.result, question, range, true);
+    const pack1 = try dstore.contextPack(allocator, f.journal, &v1.visible, v1.result, question, range, true, null);
     defer allocator.free(pack1);
     const index1 = (try readArtifact(allocator, f.journal, dstore.IndexFile)).?;
     defer allocator.free(index1);
@@ -209,7 +209,7 @@ test "phase 7: rebuild is deterministic after deletion" {
     var v2 = try visibleOf(allocator, f.journal);
     defer v2.recs.deinit();
     defer v2.visible.deinit();
-    const pack2 = try dstore.contextPack(allocator, f.journal, &v2.visible, v2.result, question, range, true);
+    const pack2 = try dstore.contextPack(allocator, f.journal, &v2.visible, v2.result, question, range, true, null);
     defer allocator.free(pack2);
     const index2 = (try readArtifact(allocator, f.journal, dstore.IndexFile)).?;
     defer allocator.free(index2);
@@ -406,20 +406,24 @@ test "phase 7: status reports states; rebuild restores; notes untouched" {
     // (Reports are deinit-ed by hand, right after use: the status is the
     // only live derived value between reads.)
     var rep = try dstore.artifactStatus(allocator, f.journal, v.result);
-    try std.testing.expectEqual(@as(usize, 2), rep.items.len);
+    try std.testing.expectEqual(@as(usize, 3), rep.items.len);
     try std.testing.expectEqual(dstore.ArtifactState.missing, rep.items[0].state);
     try std.testing.expectEqual(dstore.ArtifactState.missing, rep.items[1].state);
+    try std.testing.expectEqual(dstore.ArtifactState.missing, rep.items[2].state);
     rep.deinit();
 
-    // Build the artifacts; the status flips to fresh.
-    _ = try dstore.contextPack(allocator, f.journal, &v.visible, v.result, "auth", range, true);
+    // Build the artifacts; the status flips to fresh. The vector artifact
+    // ("embed") is not one of them: only `derived rebuild --embeddings`
+    // builds it, and a pack never loads a model.
+    _ = try dstore.contextPack(allocator, f.journal, &v.visible, v.result, "auth", range, true, null);
     rep = try dstore.artifactStatus(allocator, f.journal, v.result);
-    try std.testing.expectEqual(@as(usize, 3), rep.items.len);
+    try std.testing.expectEqual(@as(usize, 4), rep.items.len);
     try std.testing.expectEqual(dstore.ArtifactState.fresh, rep.items[0].state);
     try std.testing.expectEqual(@as(?u8, 1), rep.items[0].version);
     try std.testing.expectEqual(v.result.record_count, rep.items[0].record_count.?);
-    try std.testing.expectEqual(dstore.ArtifactState.fresh, rep.items[1].state);
+    try std.testing.expectEqual(dstore.ArtifactState.missing, rep.items[1].state);
     try std.testing.expectEqual(dstore.ArtifactState.fresh, rep.items[2].state);
+    try std.testing.expectEqual(dstore.ArtifactState.fresh, rep.items[3].state);
     rep.deinit();
 
     // Corrupt the index footer: the hash check fails, status says corrupt.
@@ -432,7 +436,7 @@ test "phase 7: status reports states; rebuild restores; notes untouched" {
     try std.testing.expectEqual(dstore.ArtifactState.corrupt, rep.items[0].state);
     rep.deinit();
     // A corrupt index is never served: the next pack rebuilds it.
-    const pack = try dstore.contextPack(allocator, f.journal, &v.visible, v.result, "auth", range, true);
+    const pack = try dstore.contextPack(allocator, f.journal, &v.visible, v.result, "auth", range, true, null);
     allocator.free(pack);
     rep = try dstore.artifactStatus(allocator, f.journal, v.result);
     try std.testing.expectEqual(dstore.ArtifactState.fresh, rep.items[0].state);
@@ -445,12 +449,26 @@ test "phase 7: status reports states; rebuild restores; notes untouched" {
     defer v2.recs.deinit();
     defer v2.visible.deinit();
     rep = try dstore.artifactStatus(allocator, f.journal, v2.result);
-    for (rep.items) |a| try std.testing.expectEqual(dstore.ArtifactState.stale, a.state);
+    for (rep.items) |a| {
+        // The vector artifact was never built here: it stays missing while
+        // everything else goes stale.
+        const want = if (std.mem.eql(u8, a.name, "embed")) dstore.ArtifactState.missing else dstore.ArtifactState.stale;
+        try std.testing.expectEqual(want, a.state);
+    }
     rep.deinit();
     const counts = try dstore.rebuild(allocator, f.journal, &v2.visible, v2.result);
     try std.testing.expect(counts.word_count > 0);
     rep = try dstore.artifactStatus(allocator, f.journal, v2.result);
-    for (rep.items) |a| try std.testing.expectEqual(dstore.ArtifactState.fresh, a.state);
+    for (rep.items) |a| {
+        // The rebuild restores index and profile; digests regenerate on
+        // demand (they were deleted), and the vector artifact is still the
+        // flag's job, not the rebuild's.
+        const want = if (std.mem.eql(u8, a.name, "embed") or std.mem.startsWith(u8, a.name, dstore.DigestsDir ++ "/"))
+            dstore.ArtifactState.missing
+        else
+            dstore.ArtifactState.fresh;
+        try std.testing.expectEqual(want, a.state);
+    }
     rep.deinit();
     const notes = (try readArtifact(allocator, f.journal, dstore.NotesFile)).?;
     try std.testing.expectEqualStrings("user-owned\n", notes);
@@ -474,7 +492,7 @@ test "phase 7: a non-persisting pack (MCP) writes nothing" {
     const range = view.DayRange{ .start = D0, .end = D0 + 1 };
     const question = "anything about auth?";
 
-    const mem = try dstore.contextPack(allocator, f.journal, &v.visible, v.result, question, range, false);
+    const mem = try dstore.contextPack(allocator, f.journal, &v.visible, v.result, question, range, false, null);
     defer allocator.free(mem);
     // In-memory only: no artifacts exist on disk.
     try std.testing.expect((try readArtifact(allocator, f.journal, dstore.IndexFile)) == null);
@@ -483,7 +501,7 @@ test "phase 7: a non-persisting pack (MCP) writes nothing" {
     try std.testing.expect(d);
 
     // The persisting pack carries the same bytes.
-    const disk = try dstore.contextPack(allocator, f.journal, &v.visible, v.result, question, range, true);
+    const disk = try dstore.contextPack(allocator, f.journal, &v.visible, v.result, question, range, true, null);
     defer allocator.free(disk);
     try std.testing.expectEqualSlices(u8, mem, disk);
 }

@@ -206,31 +206,41 @@ pub fn renderRange(allocator: Allocator, headers: []const records.Header, payloa
             try out.append(allocator, '\n');
             current_day = entry.day;
         }
-        const time = timeString(entry.ts_ms, entry.tz_offset_min);
-        var line_buf: [1 << 16]u8 = undefined;
-        var written: usize = 0;
-        written += (std.fmt.bufPrint(line_buf[written..], "{s}", .{time}) catch unreachable).len;
-        if (entry.redacted) {
-            written += (std.fmt.bufPrint(line_buf[written..], " [redacted]", .{}) catch unreachable).len;
-        } else {
-            if (entry.edited) {
-                written += (std.fmt.bufPrint(line_buf[written..], " (edited)", .{}) catch unreachable).len;
-            }
-            if (entry.tags.len > 0) {
-                line_buf[written] = ' ';
-                written += 1; // space before the tag block
-                for (entry.tags) |tag| {
-                    written += (std.fmt.bufPrint(line_buf[written..], "[{s}]", .{tag}) catch unreachable).len;
-                }
-            }
-            line_buf[written] = ' ';
-            written += 1; // space before the text
-            written += (std.fmt.bufPrint(line_buf[written..], "{s}", .{entry.text}) catch unreachable).len;
-        }
-        try out.appendSlice(allocator, line_buf[0..written]);
+        const line = try entryLine(allocator, entry);
+        defer allocator.free(line);
+        try out.appendSlice(allocator, line);
         try out.append(allocator, '\n');
     }
     return out.toOwnedSlice(allocator);
+}
+
+/// The exact line the view renderer emits for `entry` — the time, the
+/// redaction or edit marker, the tag block, and the text — without the
+/// trailing newline. The Phase 4 vectors pin its bytes; the embedding
+/// input for an entry is this line (spec/semantic.md section 4).
+pub fn entryLine(allocator: Allocator, entry: ViewEntry) RenderError![]u8 {
+    var line_buf: [1 << 16]u8 = undefined;
+    var written: usize = 0;
+    const time = timeString(entry.ts_ms, entry.tz_offset_min);
+    written += (std.fmt.bufPrint(line_buf[written..], "{s}", .{time}) catch unreachable).len;
+    if (entry.redacted) {
+        written += (std.fmt.bufPrint(line_buf[written..], " [redacted]", .{}) catch unreachable).len;
+    } else {
+        if (entry.edited) {
+            written += (std.fmt.bufPrint(line_buf[written..], " (edited)", .{}) catch unreachable).len;
+        }
+        if (entry.tags.len > 0) {
+            line_buf[written] = ' ';
+            written += 1; // space before the tag block
+            for (entry.tags) |tag| {
+                written += (std.fmt.bufPrint(line_buf[written..], "[{s}]", .{tag}) catch unreachable).len;
+            }
+        }
+        line_buf[written] = ' ';
+        written += 1; // space before the text
+        written += (std.fmt.bufPrint(line_buf[written..], "{s}", .{entry.text}) catch unreachable).len;
+    }
+    return allocator.dupe(u8, line_buf[0..written]);
 }
 
 fn freeTagSlices(allocator: Allocator, tag_slices: [][]const []const u8) void {
