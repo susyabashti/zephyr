@@ -28,24 +28,46 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          # Official ziglang.org release tarballs for ${{ env.ZIG_VERSION }};
+          # shasums from ziglang.org/download/index.json.
+          - runner: macos-15
             target: darwin-arm64
-          - runner: macos-13
+            zig-tarball: zig-aarch64-macos-0.17.0.tar.xz
+            zig-shasum: b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a
+          - runner: macos-15-intel
             target: darwin-x64
+            zig-tarball: zig-x86_64-macos-0.17.0.tar.xz
+            zig-shasum: 4f9a1c5269aa17ebda5e6d3c2b89d6cbf36f7d2b22a0306e9ab98f25f95529c6
           - runner: ubuntu-22.04
             target: linux-x64
+            zig-tarball: zig-x86_64-linux-0.17.0.tar.xz
+            zig-shasum: 1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
           - runner: ubuntu-24.04-arm
             target: linux-arm64
+            zig-tarball: zig-aarch64-linux-0.17.0.tar.xz
+            zig-shasum: 9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - uses: ziglang/zig-action@master
-        with:
-          version: ${{ env.ZIG_VERSION }}
+      - name: Install Zig ${{ env.ZIG_VERSION }} (official tarball, sha256-verified)
+        run: |
+          set -eu
+          name="${{ matrix.zig-tarball }}"
+          expected="${{ matrix.zig-shasum }}"
+          curl -fsSL -o zig.tar.xz "https://ziglang.org/download/${ZIG_VERSION}/${name}"
+          actual="$( (shasum -a 256 zig.tar.xz 2>/dev/null || sha256sum zig.tar.xz) | cut -d' ' -f1 )"
+          if [ "$actual" != "$expected" ]; then
+            echo "sha256 mismatch: expected $expected, got $actual" >&2
+            exit 1
+          fi
+          tar xJf zig.tar.xz
+          mv "${name%.tar.xz}" zig-toolchain
+          echo "${GITHUB_WORKSPACE}/zig-toolchain" >> "$GITHUB_PATH"
+          ./zig-toolchain/zig version
       - name: Build (ReleaseFast)
-        run: zig build -DOptimizeMode=ReleaseFast
+        run: zig build -Doptimize=ReleaseFast
       - name: Package
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then

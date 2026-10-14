@@ -72,6 +72,12 @@ pub fn build(b: *std.Build) void {
             metal_flag,                "-DLLAMA_BUILD_COMMON=OFF",   "-DLLAMA_BUILD_TESTS=OFF",
             "-DLLAMA_BUILD_TOOLS=OFF", "-DLLAMA_BUILD_EXAMPLES=OFF", "-DLLAMA_BUILD_SERVER=OFF",
             "-DLLAMA_BUILD_APP=OFF",
+            // OpenMP: off everywhere, so the static link set never depends
+            // on which OpenMP runtime the host toolchain ships (libgomp on
+            // Linux, none on the macOS runners). ggml's internal thread
+            // pool still parallelizes; this also keeps the distributed
+            // Linux binaries free of a libgomp runtime dependency.
+              "-DGGML_OPENMP=OFF",
         };
         var configure_args = std.ArrayList([]const u8).empty;
         for (base_args) |a| configure_args.append(b.graph.arena, a) catch @panic("OOM");
@@ -90,10 +96,15 @@ pub fn build(b: *std.Build) void {
         // llama-config.cmake and ggml/ggml-config.cmake): llama -> ggml ->
         // ggml-base -> every built backend; ld64 resolves static archives
         // left to right, so this order is load-bearing. The archives live
-        // in the cmake build tree (only libllama.a is "installed"). This
-        // list matches the macOS build (Metal + Accelerate/BLAS on);
-        // -Dno-embed=true remains the build path for other platforms.
-        const llama_libs = [_][]const u8{ "llama", "ggml", "ggml-base", "ggml-cpu", "ggml-blas", "ggml-metal" };
+        // in the cmake build tree (only libllama.a is "installed").
+        // Backend archives only exist when their GGML_<BACKEND> option is
+        // on (ggml/src/CMakeLists.txt ggml_add_backend): the pinned cmake
+        // defaults BLAS and Metal to ON only on Apple, so Linux links the
+        // core set and macOS links the full set.
+        const llama_libs: []const []const u8 = if (target.result.os.tag == .macos)
+            &[_][]const u8{ "llama", "ggml", "ggml-base", "ggml-cpu", "ggml-blas", "ggml-metal" }
+        else
+            &[_][]const u8{ "llama", "ggml", "ggml-base", "ggml-cpu" };
         embed.addLibraryPath(b.path("zig-out/llama/src"));
         embed.addLibraryPath(b.path("zig-out/llama/ggml/src"));
         embed.addLibraryPath(b.path("zig-out/llama/ggml/src/ggml-blas"));

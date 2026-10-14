@@ -18,17 +18,40 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-14, ubuntu-22.04, ubuntu-24.04-arm]
+        include:
+          # Official ziglang.org release tarballs for ${{ env.ZIG_VERSION }};
+          # shasums from ziglang.org/download/index.json.
+          - runner: macos-15
+            zig-tarball: zig-aarch64-macos-0.17.0.tar.xz
+            zig-shasum: b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a
+          - runner: ubuntu-22.04
+            zig-tarball: zig-x86_64-linux-0.17.0.tar.xz
+            zig-shasum: 1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
+          - runner: ubuntu-24.04-arm
+            zig-tarball: zig-aarch64-linux-0.17.0.tar.xz
+            zig-shasum: 9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - uses: ziglang/zig-action@master
-        with:
-          version: ${{ env.ZIG_VERSION }}
+      - name: Install Zig ${{ env.ZIG_VERSION }} (official tarball, sha256-verified)
+        run: |
+          set -eu
+          name="${{ matrix.zig-tarball }}"
+          expected="${{ matrix.zig-shasum }}"
+          curl -fsSL -o zig.tar.xz "https://ziglang.org/download/${ZIG_VERSION}/${name}"
+          actual="$( (shasum -a 256 zig.tar.xz 2>/dev/null || sha256sum zig.tar.xz) | cut -d' ' -f1 )"
+          if [ "$actual" != "$expected" ]; then
+            echo "sha256 mismatch: expected $expected, got $actual" >&2
+            exit 1
+          fi
+          tar xJf zig.tar.xz
+          mv "${name%.tar.xz}" zig-toolchain
+          echo "${GITHUB_WORKSPACE}/zig-toolchain" >> "$GITHUB_PATH"
+          ./zig-toolchain/zig version
       - name: Build (ReleaseFast)
-        run: zig build -DOptimizeMode=ReleaseFast
+        run: zig build -Doptimize=ReleaseFast
       - name: Unit + phase tests
         run: zig build test
       - name: Format check
@@ -43,18 +66,33 @@ jobs:
 
   eval:
     name: retrieval eval (main only)
-    runs-on: macos-14
+    runs-on: macos-15
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     timeout-minutes: 90
+    env:
+      ZIG_TARBALL: zig-aarch64-macos-0.17.0.tar.xz
+      ZIG_SHASUM: b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - uses: ziglang/zig-action@master
-        with:
-          version: ${{ env.ZIG_VERSION }}
+      - name: Install Zig ${{ env.ZIG_VERSION }} (official tarball, sha256-verified)
+        run: |
+          set -eu
+          name="${{ env.ZIG_TARBALL }}"
+          expected="${{ env.ZIG_SHASUM }}"
+          curl -fsSL -o zig.tar.xz "https://ziglang.org/download/${ZIG_VERSION}/${name}"
+          actual="$( (shasum -a 256 zig.tar.xz 2>/dev/null || sha256sum zig.tar.xz) | cut -d' ' -f1 )"
+          if [ "$actual" != "$expected" ]; then
+            echo "sha256 mismatch: expected $expected, got $actual" >&2
+            exit 1
+          fi
+          tar xJf zig.tar.xz
+          mv "${name%.tar.xz}" zig-toolchain
+          echo "${GITHUB_WORKSPACE}/zig-toolchain" >> "$GITHUB_PATH"
+          ./zig-toolchain/zig version
       - name: Build (ReleaseFast)
-        run: zig build -DOptimizeMode=ReleaseFast
+        run: zig build -Doptimize=ReleaseFast
       # The key embeds the pinned sha256 (src/embed/model.zig): a changed
       # pin misses the cache, and `model fetch` re-verifies any cached file.
       - name: Embedding model (cached)
@@ -74,10 +112,25 @@ jobs:
     runs-on: ubuntu-22.04
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     timeout-minutes: 90
+    env:
+      ZIG_TARBALL: zig-x86_64-linux-0.17.0.tar.xz
+      ZIG_SHASUM: 1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
     steps:
       - uses: actions/checkout@v4
-      - uses: ziglang/zig-action@master
-        with:
-          version: ${{ env.ZIG_VERSION }}
+      - name: Install Zig ${{ env.ZIG_VERSION }} (official tarball, sha256-verified)
+        run: |
+          set -eu
+          name="${{ env.ZIG_TARBALL }}"
+          expected="${{ env.ZIG_SHASUM }}"
+          curl -fsSL -o zig.tar.xz "https://ziglang.org/download/${ZIG_VERSION}/${name}"
+          actual="$( (shasum -a 256 zig.tar.xz 2>/dev/null || sha256sum zig.tar.xz) | cut -d' ' -f1 )"
+          if [ "$actual" != "$expected" ]; then
+            echo "sha256 mismatch: expected $expected, got $actual" >&2
+            exit 1
+          fi
+          tar xJf zig.tar.xz
+          mv "${name%.tar.xz}" zig-toolchain
+          echo "${GITHUB_WORKSPACE}/zig-toolchain" >> "$GITHUB_PATH"
+          ./zig-toolchain/zig version
       - name: Round trip (ReleaseFast)
-        run: zig build roundtrip -DOptimizeMode=ReleaseFast
+        run: zig build roundtrip -Doptimize=ReleaseFast

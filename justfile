@@ -8,7 +8,7 @@ build:
     zig build
 
 build-release:
-    zig build -DOptimizeMode=ReleaseFast
+    zig build -Doptimize=ReleaseFast
 
 test:
     zig build test
@@ -30,7 +30,7 @@ eval: build
 
 # 100k-entry round trip (slow).
 roundtrip:
-    zig build roundtrip -DOptimizeMode=ReleaseFast
+    zig build roundtrip -Doptimize=ReleaseFast
 
 # Build ReleaseFast and drop the binary in ~/.local/bin.
 install-local: build-release
