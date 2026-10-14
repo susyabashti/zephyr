@@ -1,0 +1,83 @@
+# CI: build, unit + phase tests, format check, and the byte-exact gates on
+# every pull request and push to main. The retrieval eval (real model) and
+# the 100k round trip are slow, so they run only on pushes to main.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  ZIG_VERSION: 0.17.0
+
+jobs:
+  test:
+    name: build + tests + gates (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-14, ubuntu-22.04, ubuntu-24.04-arm]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: ziglang/zig-action@master
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Build (ReleaseFast)
+        run: zig build -DOptimizeMode=ReleaseFast
+      - name: Unit + phase tests
+        run: zig build test
+      - name: Format check
+        run: zig build fmt
+      - name: Gates (byte-exact)
+        run: |
+          python3 test/reference.py --check
+          python3 test/otsref.py --check
+          python3 test/mcpref.py --check
+          python3 test/derivedref.py --check
+          python3 test/semref.py --check
+
+  eval:
+    name: retrieval eval (main only)
+    runs-on: macos-14
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: ziglang/zig-action@master
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Build (ReleaseFast)
+        run: zig build -DOptimizeMode=ReleaseFast
+      # The key embeds the pinned sha256 (src/embed/model.zig): a changed
+      # pin misses the cache, and `model fetch` re-verifies any cached file.
+      - name: Embedding model (cached)
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/.zephyr/models
+          key: zephyr-embeddinggemma-300M-q8-0-a0f7b4e13c397a6e
+      - name: Fetch the model if the cache missed
+        run: |
+          HOME="${RUNNER_TEMP}" ./zig-out/bin/zephyr model fetch
+          echo "ZEPHYR_EMBED_MODEL=${RUNNER_TEMP}/.zephyr/models/embeddinggemma-300M-Q8_0.gguf" >> "$GITHUB_ENV"
+      - name: Retrieval eval (section 8)
+        run: python3 test/semref.py --eval
+
+  roundtrip:
+    name: 100k round trip (main only)
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ziglang/zig-action@master
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Round trip (ReleaseFast)
+        run: zig build roundtrip -DOptimizeMode=ReleaseFast

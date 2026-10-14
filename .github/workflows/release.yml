@@ -1,0 +1,84 @@
+# Release: on a tag push (v*) — or manually with an existing tag — build
+# ReleaseFast binaries for every supported target, package tarballs,
+# publish sha256sums.txt, and upload everything to the GitHub release.
+#
+# Releasing is: git tag v0.2.1 && git push origin v0.2.1
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)publish, e.g. v0.2.1"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  ZIG_VERSION: 0.17.0
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: darwin-arm64
+          - runner: macos-13
+            target: darwin-x64
+          - runner: ubuntu-22.04
+            target: linux-x64
+          - runner: ubuntu-24.04-arm
+            target: linux-arm64
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: ziglang/zig-action@master
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Build (ReleaseFast)
+        run: zig build -DOptimizeMode=ReleaseFast
+      - name: Package
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.tag }}"
+          else
+            VERSION="${{ github.ref_name }}"
+          fi
+          tar czf "zephyr-${VERSION}-${{ matrix.target }}.tar.gz" -C zig-out/bin zephyr
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zephyr-${{ matrix.target }}
+          path: zephyr-*.tar.gz
+
+  publish:
+    name: publish release
+    runs-on: ubuntu-22.04
+    needs: build
+    steps:
+      - name: Collect artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum zephyr-*.tar.gz | sort -k 2 > sha256sums.txt
+          cat sha256sums.txt
+      - name: Publish to GitHub
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
