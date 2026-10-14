@@ -16,6 +16,7 @@ const Allocator = std.mem.Allocator;
 
 pub fn run(
     arena: Allocator,
+    gpa: Allocator,
     io: Io,
     err_file: File,
     out: File,
@@ -50,6 +51,7 @@ pub fn run(
         ));
         if (with_embeddings) {
             const model_path = try rank.resolveModelPathOrReport(arena, io, err_file, environ_map);
+            try rank.fetchDefaultModelIfNeeded(gpa, io, err_file, out, environ_map, model_path);
             const engine = embed_mod.create(arena, io, model_path) catch |err| {
                 try rank.reportEmbedError(arena, io, err_file, model_path, err);
                 return err;

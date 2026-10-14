@@ -39,15 +39,20 @@ pub fn printUsage(file: File, io: Io) File.Writer.Error!void {
         \\  zephyr recap [start..end]         period digest (default: the
         \\                                   current week, Mon-Sun)
         \\  zephyr profile                    derived profile plus notes.md
-        \\\  zephyr derived status|rebuild     inspect or force-rebuild the
-        \\\                                   derived artifacts; `rebuild
-        \\\                                   --embeddings` also builds the
-        \\\                                   vector artifact (loads the model)
-        \\\  zephyr rank <query...> [--mode keyword|vector|hybrid]
-        \\\                                   [--top N]  ranked retrieval;
-        \\\                                   default: hybrid, top 10. Vector
-        \\\                                   and hybrid need the fresh
-        \\\                                   embedding artifact
+        \\  zephyr derived status|rebuild     inspect or force-rebuild the
+        \\                                   derived artifacts; `rebuild
+        \\                                   --embeddings` also builds the
+        \\                                   vector artifact (loads the model)
+        \\  zephyr rank <query...> [--mode keyword|vector|hybrid]
+        \\                                   [--top N]  ranked retrieval;
+        \\                                   default: hybrid, top 10. Vector
+        \\                                   and hybrid need the fresh
+        \\                                   embedding artifact
+        \\  zephyr model fetch [--force]     download the pinned embedding
+        \\                                   model (auto-downloaded on first
+        \\                                   use of the embedding surface)
+        \\  zephyr model status             where the model lives, and
+        \\                                   whether it matches the pin
         \\  zephyr edit <seq> [-t TAG]... "text"
         \\                                   amend an entry (tags kept unless
         \\                                   -t is given)

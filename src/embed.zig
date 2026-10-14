@@ -22,6 +22,13 @@ pub const EmbedError = core.embed.EmbedError;
 /// No engine code — available in `--no-embed` builds for the CLI messages.
 pub const model = @import("embed/model.zig");
 
+/// The model fetcher: downloads the pinned model, verifies it against
+/// the pin, and installs it. Std-only — available in `--no-embed`
+/// builds too (it can pre-fetch the model there).
+pub const fetch = @import("embed/fetch.zig");
+
+pub const FetchError = fetch.FetchError;
+
 pub const CreateError = if (options.has_embed)
     @import("embed/engine.zig").CreateError
 else

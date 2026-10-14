@@ -30,4 +30,6 @@ pub const RunError = error{
     core.view.RenderError || core.dstore.PackError || core.dstore.StatusError ||
     core.dstore.RebuildError || core.dstore.LoadEmbedError || File.OpenError || File.Writer.Error ||
     std.Io.Reader.ShortError || std.crypto.errors.IdentityElementError || std.process.CurrentPathError ||
-    mcp.server.RunError || embed_mod.CreateError; // Phase 8: the embedding surface (rank, ask hybrid, derived rebuild --embeddings)
+    mcp.server.RunError || embed_mod.CreateError || // Phase 8: the embedding surface (rank, ask hybrid, derived rebuild --embeddings)
+    embed_mod.FetchError || // distribution: model fetch (download, verify, install)
+    std.process.CurrentPathAllocError; // model fetch: a relative $ZEPHYR_EMBED_MODEL is resolved against the cwd

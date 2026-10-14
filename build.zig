@@ -288,6 +288,8 @@ pub fn build(b: *std.Build) void {
         "src/mcp/protocol.zig",
         // Phase 8: the C binding's layout tests (no engine link needed).
         "src/embed/llama.zig",
+        // Distribution: the model fetcher's network-free paths.
+        "src/embed/fetch.zig",
     };
     for (core_test_files) |path| {
         const module = b.createModule(.{

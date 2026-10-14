@@ -34,6 +34,7 @@ const Mode = enum { keyword, vector, hybrid };
 
 pub fn run(
     arena: Allocator,
+    gpa: Allocator,
     io: Io,
     err_file: File,
     out: File,
@@ -94,6 +95,7 @@ pub fn run(
     defer store.deinit();
 
     const model_path = try resolveModelPathOrReport(arena, io, err_file, environ_map);
+    try fetchDefaultModelIfNeeded(gpa, io, err_file, out, environ_map, model_path);
     const engine = embed_mod.create(arena, io, model_path) catch |err| {
         try reportEmbedError(arena, io, err_file, model_path, err);
         return err;
@@ -157,20 +159,61 @@ fn renderHits(
 }
 
 /// The pinned model's path, with an actionable error when the environment
-/// cannot name one (spec/semantic.md section 2). Shared by `rank` and
-/// `derived rebuild --embeddings` (derived.zig).
+/// cannot name one (spec/semantic.md section 2). A relative
+/// `$ZEPHYR_EMBED_MODEL` is resolved against the cwd: the engine (and the
+/// fetcher) open the path with std's *Absolute entry points, which
+/// assert. Shared by `rank` and `derived rebuild --embeddings`
+/// (derived.zig).
 pub fn resolveModelPathOrReport(
     arena: Allocator,
     io: Io,
     err_file: File,
     environ_map: *const std.process.Environ.Map,
 ) errors.RunError![]const u8 {
-    return embed_mod.model.resolveModelPath(arena, environ_map) catch |err| switch (err) {
+    const raw = embed_mod.model.resolveModelPath(arena, environ_map) catch |err| switch (err) {
         error.HomeNotFound => {
             try output.printLine(err_file, io, "no embedding model path: set $ZEPHYR_EMBED_MODEL or $HOME");
             return error.ModelNotFound;
         },
-        else => |e| e,
+        else => |e| return e,
+    };
+    if (std.Io.Dir.path.isAbsolute(raw)) return raw;
+    const cwd = try std.process.currentPathAlloc(io, arena);
+    return try arena.print("{s}/{s}", .{ cwd, raw });
+}
+
+/// Auto-fetch (distribution): when the pinned model is missing or the
+/// wrong size at the *default* location, download it now; a
+/// `$ZEPHYR_EMBED_MODEL` path is never populated automatically. Stat-only
+/// pre-check: a size-matching file is left to the engine's own hash gate
+/// (which re-hashes the model on every load). Shared by `rank` and
+/// `derived rebuild --embeddings` (derived.zig).
+pub fn fetchDefaultModelIfNeeded(
+    gpa: Allocator,
+    io: Io,
+    err_file: File,
+    out: File,
+    environ_map: *const std.process.Environ.Map,
+    model_path: []const u8,
+) errors.RunError!void {
+    if (environ_map.get(embed_mod.model.ModelEnv) != null) return;
+    switch (try embed_mod.fetch.preCheck(io, model_path)) {
+        .ok => return,
+        .absent, .wrong_size => {},
+    }
+    embed_mod.fetch.downloadAndInstall(gpa, io, environ_map, out, model_path) catch |err| switch (err) {
+        error.HashMismatch => {
+            try output.printLine(err_file, io, "model download failed: the file does not match the pinned sha256 (retry: zephyr model fetch)");
+            return err;
+        },
+        error.BadResponse => {
+            try output.printLine(err_file, io, "model download failed: the server did not return the model (retry: zephyr model fetch)");
+            return err;
+        },
+        else => |e| {
+            try output.printLine(err_file, io, "could not download the embedding model: check your network connection (then run: zephyr model fetch)");
+            return e;
+        },
     };
 }
 

@@ -13,6 +13,9 @@ pub fn main(init: std.process.Init) !void {
         // are runtime faults (exit 1).
         error.EmbeddingsUnavailable, error.EngineUnavailable, error.ModelNotFound, error.ModelMismatch => std.process.exit(2),
         error.ModelLoadFailed, error.ContextInitFailed, error.DecodeFailed, error.SequenceTooLong => std.process.exit(1),
+        // Distribution: the model download failed (server, network, or the
+        // bytes did not match the pin).
+        error.BadResponse, error.HashMismatch, error.ParentDirNotFound => std.process.exit(1),
         else => {
             std.debug.print("zephyr: {s}\n", .{@errorName(err)});
             std.process.exit(1);
