@@ -69,6 +69,7 @@ deterministic fake.
 | `src/cli/journal.zig` | shared journal access: path resolution (`--journal`, `$ZEPHYR_HOME`), open, verify-before-trust gate, wall clock, footer head |
 | `src/cli/output.zig` | all CLI formatting and rendering: stdout/stderr writers, usage text, FAIL/status/anchor lines |
 | `src/cli/embed_helpers.zig` | shared model-load helpers for the embedding commands: path resolution, auto-fetch, actionable error reporting |
+| `src/cli/render_tests.zig` | test root for the CLI layer: pulls the styled renderer tests into the test step (no logic) |
 | `src/cli/commands/ask.zig` | `zephyr ask` — deterministic context pack for the user's AI; degrades to keyword when embeddings fail |
 | `src/cli/commands/checkpoint.zig` | `zephyr checkpoint` — sign the verified journal state into a `.zpa` anchor |
 | `src/cli/commands/derived.zig` | `zephyr derived status\|rebuild` — inspect/force-rebuild derived artifacts; `--embeddings` loads the model |

@@ -142,8 +142,8 @@ test "styled day view: off style is the frozen view; on style adds SGR only" {
     const work_tags = [_][]const u8{"work"};
     const entries = [_]core.view.ViewEntry{
         .{ .seq = 0, .ts_ms = 1_767_227_400_000, .tz_offset_min = 0, .day = 20454, .redacted = false, .edited = false, .text = "hello", .tags = &.{} },
-        .{ .seq = 1, .ts_ms = 1_767_227_580_000, .tz_offset_min = 0, .day = 20455, .redacted = true, .edited = false, .text = "", .tags = &.{} },
-        .{ .seq = 2, .ts_ms = 1_767_227_740_000, .tz_offset_min = 0, .day = 20455, .redacted = false, .edited = true, .text = "edited hello", .tags = &work_tags },
+        .{ .seq = 1, .ts_ms = 1_767_315_540_000, .tz_offset_min = 0, .day = 20455, .redacted = true, .edited = false, .text = "", .tags = &.{} },
+        .{ .seq = 2, .ts_ms = 1_767_316_140_000, .tz_offset_min = 0, .day = 20455, .redacted = false, .edited = true, .text = "edited hello", .tags = &work_tags },
     };
     const range = core.view.DayRange{ .start = 20454, .end = 20456 };
 
