@@ -193,6 +193,5 @@ zephyr export --for-ai 2026-10-01:2026-10-14    # a range
 
 - [features.md](features.md) — every feature with its current behavior, and
   the user journey.
-- [plan.md](plan.md) — goals, threat model, and the phase breakdown.
 - `spec/` — the byte-level contracts (record format, anchors, OTS, derived
   layer, MCP, semantic).

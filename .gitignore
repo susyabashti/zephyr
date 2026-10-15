@@ -8,6 +8,10 @@ models/
 .tmp-*
 __pycache__/
 
+# Local-only development docs (kept out of the public repo)
+docs/plan.md
+docs/architecture.html
+
 # General
 .DS_Store
 .localized

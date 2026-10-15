@@ -1,9 +1,9 @@
 # Project map
 
 Where every part of Zephyr lives. This file is for **navigation** — read
-[features.md](features.md) for user-facing behavior, [plan.md](plan.md) and
-[architecture.html](architecture.html) for design, and `spec/` for the byte
-contracts. The file index below is **machine-checked**: the `test/structure.py`
+[features.md](features.md) for user-facing behavior and `spec/` for the byte
+contracts. (The internal design docs — `plan.md`, `architecture.html` — are
+local-only and gitignored.) The file index below is **machine-checked**: the `test/structure.py`
 gate fails CI if it drifts from `src/`, so it is safe to trust.
 
 ## The shape
@@ -36,7 +36,7 @@ deterministic fake.
 | `src/` | all Zig source: `core/` (domain), `cli/` (commands), `embed/` (engine), `mcp/` (AI server) |
 | `spec/` | the frozen contracts (`record-format.md`, `anchor-format.md`, `ots-anchor.md`, `derived.md`, `semantic.md`, `mcp.md`) + `vectors/` (pinned byte vectors) + `data/` (generated tables) |
 | `test/` | Zig gates (test blocks wired in `build.zig`) + independent Python references (`*ref.py`) + `generate_mark_ranges.py` |
-| `docs/` | user and process docs: features, getting-started, plan, releases, architecture.html, this map |
+| `docs/` | user docs: features, getting-started, releases, this map (`plan.md` and `architecture.html` are local-only, gitignored) |
 | `.github/workflows/` | `ci.yml` (PR + main gates), `release.yml` (tag → 4 tarballs + checksums) |
 | `third_party/llama.cpp` | the pinned engine submodule (b11609, commit fcac190) |
 | `zig-out/` | build output (gitignored) |
@@ -134,7 +134,7 @@ roundtrip`, main-only in CI).
 | change build modules, flags, or test wiring | `build.zig` |
 | make a release | `docs/releases.md` (tag push does everything) + `.github/workflows/release.yml` |
 | read a command's user-facing behavior | `docs/features.md` |
-| see the layer diagram | `docs/architecture.html` |
+| see the layer diagram | `docs/architecture.html` (local-only, gitignored) |
 | change agent workflow rules | `AGENTS.md` |
 
 ## Structural invariants (enforced by `test/structure.py`)

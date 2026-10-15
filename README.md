@@ -177,8 +177,6 @@ python3 test/derivedref.py --check   # derived artifacts, byte-for-byte
 python3 test/semref.py --check       # semantic layer (add --eval for the retrieval eval)
 ```
 
-The plan, threat model, and phase breakdown live in [docs/plan.md](docs/plan.md); the layer diagram in [docs/architecture.html](docs/architecture.html).
-
 ## Releasing
 
 Releasing is a tag push — the [release workflow](.github/workflows/release.yml) builds ReleaseFast binaries for all four targets (macOS arm64/x64, Linux x64/arm64), packages tarballs, publishes `sha256sums.txt`, and uploads everything to the GitHub release:
