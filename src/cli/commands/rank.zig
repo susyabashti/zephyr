@@ -19,6 +19,7 @@ const errors = @import("../errors.zig");
 const args = @import("../args.zig");
 const output = @import("../output.zig");
 const cli_journal = @import("../journal.zig");
+const embed_helpers = @import("../embed_helpers.zig");
 
 const Io = std.Io;
 const File = Io.File;
@@ -94,10 +95,10 @@ pub fn run(
     };
     defer store.deinit();
 
-    const model_path = try resolveModelPathOrReport(arena, io, err_file, environ_map);
-    try fetchDefaultModelIfNeeded(gpa, io, err_file, out, environ_map, model_path);
+    const model_path = try embed_helpers.resolveModelPathOrReport(arena, io, err_file, environ_map);
+    try embed_helpers.fetchDefaultModelIfNeeded(gpa, io, err_file, out, environ_map, model_path);
     const engine = embed_mod.create(arena, io, model_path) catch |err| {
-        try reportEmbedError(arena, io, err_file, model_path, err);
+        try embed_helpers.reportEmbedError(arena, io, err_file, model_path, err);
         return err;
     };
     defer engine.deinit();
@@ -108,7 +109,7 @@ pub fn run(
         return error.EmbeddingsUnavailable;
     }
     const qv = engine.embed(arena, &.{question}, .query) catch |err| {
-        try reportEmbedError(arena, io, err_file, model_path, err);
+        try embed_helpers.reportEmbedError(arena, io, err_file, model_path, err);
         return err;
     };
     defer {
@@ -158,104 +159,6 @@ fn renderHits(
     }
 }
 
-/// The pinned model's path, with an actionable error when the environment
-/// cannot name one (spec/semantic.md section 2). A relative
-/// `$ZEPHYR_EMBED_MODEL` is resolved against the cwd: the engine (and the
-/// fetcher) open the path with std's *Absolute entry points, which
-/// assert. Shared by `rank` and `derived rebuild --embeddings`
-/// (derived.zig).
-pub fn resolveModelPathOrReport(
-    arena: Allocator,
-    io: Io,
-    err_file: File,
-    environ_map: *const std.process.Environ.Map,
-) errors.RunError![]const u8 {
-    const raw = embed_mod.model.resolveModelPath(arena, environ_map) catch |err| switch (err) {
-        error.HomeNotFound => {
-            try output.printLine(err_file, io, "no embedding model path: set $ZEPHYR_EMBED_MODEL or $HOME");
-            return error.ModelNotFound;
-        },
-        else => |e| return e,
-    };
-    if (std.Io.Dir.path.isAbsolute(raw)) return raw;
-    const cwd = try std.process.currentPathAlloc(io, arena);
-    return try arena.print("{s}/{s}", .{ cwd, raw });
-}
-
-/// Auto-fetch (distribution): when the pinned model is missing or the
-/// wrong size at the *default* location, download it now; a
-/// `$ZEPHYR_EMBED_MODEL` path is never populated automatically. Stat-only
-/// pre-check: a size-matching file is left to the engine's own hash gate
-/// (which re-hashes the model on every load). Shared by `rank` and
-/// `derived rebuild --embeddings` (derived.zig).
-pub fn fetchDefaultModelIfNeeded(
-    gpa: Allocator,
-    io: Io,
-    err_file: File,
-    out: File,
-    environ_map: *const std.process.Environ.Map,
-    model_path: []const u8,
-) errors.RunError!void {
-    if (environ_map.get(embed_mod.model.ModelEnv) != null) return;
-    switch (try embed_mod.fetch.preCheck(io, model_path)) {
-        .ok => return,
-        .absent, .wrong_size => {},
-    }
-    embed_mod.fetch.downloadAndInstall(gpa, io, environ_map, out, model_path) catch |err| switch (err) {
-        error.HashMismatch => {
-            try output.printLine(err_file, io, "model download failed: the file does not match the pinned sha256 (retry: zephyr model fetch)");
-            return err;
-        },
-        error.BadResponse => {
-            try output.printLine(err_file, io, "model download failed: the server did not return the model (retry: zephyr model fetch)");
-            return err;
-        },
-        else => |e| {
-            try output.printLine(err_file, io, "could not download the embedding model: check your network connection (then run: zephyr model fetch)");
-            return e;
-        },
-    };
-}
-
-/// The actionable message for an embedding-surface failure
-/// (spec/semantic.md sections 2, 7): it names the path, the pinned model,
-/// and the download URL, and never a raw engine failure. `derived rebuild
-/// --embeddings` (derived.zig) reuses it.
-pub fn reportEmbedError(
-    arena: Allocator,
-    io: Io,
-    file: File,
-    model_path: []const u8,
-    err: embed_mod.CreateError,
-) errors.RunError!void {
-    switch (err) {
-        error.EngineUnavailable => {
-            try output.printLine(file, io, "this zephyr build has no embedding engine (built with -Dno-embed=true)");
-            try output.printLine(file, io, "rebuild without the flag to enable embeddings");
-            return;
-        },
-        error.ModelNotFound => {
-            try output.printLine(file, io, try arena.print("embedding model not found at {s}", .{model_path}));
-        },
-        error.ModelMismatch => {
-            try output.printLine(file, io, try arena.print("embedding model at {s} does not match the pinned model", .{model_path}));
-        },
-        error.ModelLoadFailed => {
-            try output.printLine(file, io, "the engine refused to load the embedding model");
-            return;
-        },
-        error.ContextInitFailed => {
-            try output.printLine(file, io, "the engine could not initialize the embedding model");
-            return;
-        },
-        else => return err,
-    }
-    const hex = try shaHex(arena);
-    defer arena.free(hex);
-    try output.printLine(file, io, try arena.print("expected: {d} bytes, sha256 {s}", .{ embed_mod.model.ModelBytes, hex }));
-    try output.printLine(file, io, try arena.print("download: {s}", .{embed_mod.model.ModelDownloadUrl}));
-}
-
 fn parseMode(s: []const u8) ?Mode {
     if (std.mem.eql(u8, s, "keyword")) return .keyword;
     if (std.mem.eql(u8, s, "vector")) return .vector;
@@ -266,15 +169,5 @@ fn parseMode(s: []const u8) ?Mode {
 fn seqsOf(allocator: Allocator, hits: []const embed.RankHit) Allocator.Error![]u64 {
     const out = try allocator.alloc(u64, hits.len);
     for (out, hits) |*s, h| s.* = h.seq;
-    return out;
-}
-
-fn shaHex(allocator: Allocator) Allocator.Error![]const u8 {
-    const digits = "0123456789abcdef";
-    const out = try allocator.alloc(u8, 64);
-    for (embed_mod.model.ModelSha256, 0..) |b, i| {
-        out[i * 2] = digits[b >> 4];
-        out[i * 2 + 1] = digits[b & 0x0F];
-    }
     return out;
 }

@@ -63,6 +63,8 @@ jobs:
           python3 test/mcpref.py --check
           python3 test/derivedref.py --check
           python3 test/semref.py --check
+      - name: Structural gate (layering + map)
+        run: python3 test/structure.py --check
 
   eval:
     name: retrieval eval (main only)
