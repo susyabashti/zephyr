@@ -186,8 +186,11 @@ stale.
 
 `zephyr profile` — derived profile plus notes (section 6).
 
-`zephyr derived status` — one line per artifact: name, head, version,
-record count, fresh/stale/corrupt. `zephyr derived rebuild` forces a rebuild.
+`zephyr derived status` — one line per artifact: short name (`index`,
+`embed`, `profile`, `digest <start>..<end>`), state (`fresh`/`stale`/
+`corrupt`/`missing`), and — when known — the record count and, for the
+embedding artifact, the vector dimension. Plain text when piped; colored
+on a TTY. `zephyr derived rebuild` forces a rebuild.
 
 **`get_context` (MCP).** New tool on the existing server:
 `get_context {question: string (required), from?: date, to?: date}` → the

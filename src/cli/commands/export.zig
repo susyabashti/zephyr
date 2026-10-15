@@ -15,6 +15,7 @@ const Allocator = std.mem.Allocator;
 pub fn run(
     arena: Allocator,
     io: Io,
+    style: output.Style,
     err_file: File,
     out: File,
     environ_map: *const std.process.Environ.Map,
@@ -33,13 +34,13 @@ pub fn run(
             return error.Usage;
         };
     }
-    const journal = try cli_journal.openReadJournal(arena, io, err_file, environ_map, path);
+    const journal = try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path);
     defer journal.close();
     const rendered = core.exporter.render(arena, &journal, range) catch |err| switch (err) {
         // Refused before rendering; re-verify only to report the position.
         error.VerifyFailed => {
             const result = try journal.verify(arena);
-            try output.reportIssue(err_file, io, arena, result.issue.?);
+            try output.reportIssue(err_file, io, style, arena, result.issue.?);
             return error.VerifyFailed;
         },
         else => return err,

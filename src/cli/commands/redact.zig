@@ -14,6 +14,7 @@ const Allocator = std.mem.Allocator;
 pub fn run(
     arena: Allocator,
     io: Io,
+    style: output.Style,
     err_file: File,
     out: File,
     environ_map: *const std.process.Environ.Map,
@@ -27,9 +28,9 @@ pub fn run(
         if (!std.mem.eql(u8, rest[1], "--yes")) return error.Usage;
         assume_yes = true;
     }
-    const journal = try cli_journal.openReadJournal(arena, io, err_file, environ_map, path);
+    const journal = try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path);
     defer journal.close();
-    _ = try cli_journal.verifyOrReport(arena, io, err_file, &journal);
+    _ = try cli_journal.verifyOrReport(arena, io, style, err_file, &journal);
     if (!assume_yes) {
         const proceed = try confirmRedact(arena, io, out, target);
         if (!proceed) {
@@ -39,8 +40,11 @@ pub fn run(
     }
     const now_ms = cli_journal.nowMs(io);
     const offset = try journal.tzOffsetMinutesAtMs(now_ms);
-    const seq = try journal.redact(arena, target, now_ms, offset);
-    try output.printLine(out, io, try arena.print("redacted seq {d} (redaction seq {d})", .{ target, seq }));
+    // The redaction record's own seq is internal; the entry's seq is what
+    // the user names, so the result is discarded.
+    _ = try journal.redact(arena, target, now_ms, offset);
+    const target_s = try style.accent(arena, try arena.print("{d}", .{target}));
+    try output.printLine(out, io, try arena.print("{s}redacted seq {s}", .{ try style.okMark(arena), target_s }));
 }
 
 /// Prints the warning prompt and reads one line from stdin. Anything other

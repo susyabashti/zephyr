@@ -31,23 +31,33 @@ pub fn resolveJournalPath(
 pub fn openReadJournal(
     arena: Allocator,
     io: Io,
+    style: output.Style,
     err_file: File,
     environ_map: *const std.process.Environ.Map,
     path: []const u8,
 ) errors.RunError!core.journal.Journal {
     return core.journal.Journal.open(arena, io, environ_map, path, false) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => {
-            try output.printLine(err_file, io, try arena.print("journal not found: {s}", .{path}));
+            try output.printLine(err_file, io, try arena.print(
+                "{s}journal not found: {s}",
+                .{ try style.errMark(arena), try style.dim(arena, path) },
+            ));
             return error.JournalNotFound;
         },
         else => return err,
     };
 }
 
-pub fn verifyOrReport(arena: Allocator, io: Io, err_file: File, journal: *const core.journal.Journal) errors.RunError!core.journal.VerifyResult {
+pub fn verifyOrReport(
+    arena: Allocator,
+    io: Io,
+    style: output.Style,
+    err_file: File,
+    journal: *const core.journal.Journal,
+) errors.RunError!core.journal.VerifyResult {
     const result = try journal.verify(arena);
     if (!result.ok) {
-        try output.reportIssue(err_file, io, arena, result.issue.?);
+        try output.reportIssue(err_file, io, style, arena, result.issue.?);
         return error.VerifyFailed;
     }
     return result;
@@ -58,6 +68,7 @@ pub fn verifyOrReport(arena: Allocator, io: Io, err_file: File, journal: *const 
 pub fn sealedSegmentHead(
     arena: Allocator,
     io: Io,
+    style: output.Style,
     err_file: File,
     journal: *const core.journal.Journal,
     seg_name: []const u8,
@@ -65,7 +76,10 @@ pub fn sealedSegmentHead(
     const seg_bytes = try journal.readSegment(arena, seg_name);
     return core.segment.footerHead(seg_bytes) catch |err| switch (err) {
         error.NotSealed => {
-            try output.printLine(err_file, io, try arena.print("segment {s} is not sealed; only sealed segments can be stamped", .{seg_name}));
+            try output.printLine(err_file, io, try arena.print(
+                "{s}segment {s} is not sealed",
+                .{ try style.errMark(arena), seg_name },
+            ));
             return error.SegmentNotSealed;
         },
         else => |e| return e,

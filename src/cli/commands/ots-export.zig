@@ -16,6 +16,7 @@ const Allocator = std.mem.Allocator;
 pub fn run(
     arena: Allocator,
     io: Io,
+    style: output.Style,
     err_file: File,
     out: File,
     environ_map: *const std.process.Environ.Map,
@@ -40,15 +41,15 @@ pub fn run(
     }
     const seg_name = segment_name orelse return error.Usage;
     if (!core.journal.isSegmentName(seg_name)) {
-        try output.printLine(err_file, io, try arena.print("no such segment: {s}", .{seg_name}));
+        try output.printLine(err_file, io, try arena.print("{s}no such segment: {s}", .{ try style.errMark(arena), seg_name }));
         return error.TargetNotFound;
     }
 
-    const journal = try cli_journal.openReadJournal(arena, io, err_file, environ_map, path);
+    const journal = try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path);
     defer journal.close();
-    _ = try cli_journal.verifyOrReport(arena, io, err_file, &journal);
+    _ = try cli_journal.verifyOrReport(arena, io, style, err_file, &journal);
 
-    const head = try cli_journal.sealedSegmentHead(arena, io, err_file, &journal, seg_name);
+    const head = try cli_journal.sealedSegmentHead(arena, io, style, err_file, &journal, seg_name);
 
     const target = out_path orelse blk: {
         const cwd = try std.process.currentPathAlloc(io, arena);
@@ -65,8 +66,10 @@ pub fn run(
     };
     defer File.close(f, io);
     try File.writeStreamingAll(f, io, &head);
+    const head_hex = try output.hex12Of(arena, &head);
     try output.printLine(out, io, try arena.print(
-        "ots-export: wrote {s} (head {s}); anchor this file to get an .ots proof",
-        .{ display, try output.hexOf(arena, &head) },
+        "{s}wrote {s} · head {s}",
+        .{ try style.okMark(arena), try style.dim(arena, display), try style.dim(arena, head_hex) },
     ));
+    try output.printLine(out, io, try style.dim(arena, "anchor this file to get an .ots proof"));
 }

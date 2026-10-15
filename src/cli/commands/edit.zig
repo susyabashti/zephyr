@@ -16,6 +16,7 @@ const Allocator = std.mem.Allocator;
 pub fn run(
     arena: Allocator,
     io: Io,
+    style: output.Style,
     err_file: File,
     out: File,
     environ_map: *const std.process.Environ.Map,
@@ -31,13 +32,13 @@ pub fn run(
         try output.printUsage(File.stderr(), io);
         return error.Usage;
     }
-    const journal = try cli_journal.openReadJournal(arena, io, err_file, environ_map, path);
+    const journal = try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path);
     defer journal.close();
-    _ = try cli_journal.verifyOrReport(arena, io, err_file, &journal);
+    _ = try cli_journal.verifyOrReport(arena, io, style, err_file, &journal);
     const recs = try journal.collectRecords(arena);
     defer recs.deinit();
     const target_header = core.journal.Journal.resolveEditTarget(recs.headers, target) catch |err| {
-        try output.reportTargetError(arena, io, err_file, target, err);
+        try output.reportTargetError(arena, io, style, err_file, target, err);
         return switch (err) {
             error.TargetNotFound => error.TargetNotFound,
             error.TargetNotEntry => error.TargetNotEntry,
@@ -59,7 +60,10 @@ pub fn run(
         offset,
         target_header.isPrivate(),
     );
-    try output.printLine(out, io, try arena.print("amended seq {d} (new seq {d})", .{ target, seq }));
+    const mark = try style.okMark(arena);
+    const target_s = try style.accent(arena, try arena.print("{d}", .{target}));
+    const seq_s = try style.accent(arena, try arena.print("{d}", .{seq}));
+    try output.printLine(out, io, try arena.print("{s}amended seq {s} → {s}", .{ mark, target_s, seq_s }));
 }
 
 /// The tags the view currently shows for entry `seq`: the latest amendment's

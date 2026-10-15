@@ -37,6 +37,7 @@ pub fn run(
     arena: Allocator,
     gpa: Allocator,
     io: Io,
+    style: output.Style,
     err_file: File,
     out: File,
     environ_map: *const std.process.Environ.Map,
@@ -68,9 +69,9 @@ pub fn run(
     const question = try args.joinParts(arena, words.items);
     if (question.len == 0) return error.Usage;
 
-    const journal = try cli_journal.openReadJournal(arena, io, err_file, environ_map, path);
+    const journal = try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path);
     defer journal.close();
-    const result = try cli_journal.verifyOrReport(arena, io, err_file, &journal);
+    const result = try cli_journal.verifyOrReport(arena, io, style, err_file, &journal);
     const recs = try journal.collectRecords(arena);
     defer recs.deinit();
     const visible = try view.visibleEntries(arena, recs.headers, recs.payloads);
@@ -95,10 +96,10 @@ pub fn run(
     };
     defer store.deinit();
 
-    const model_path = try embed_helpers.resolveModelPathOrReport(arena, io, err_file, environ_map);
+    const model_path = try embed_helpers.resolveModelPathOrReport(arena, io, style, err_file, environ_map);
     try embed_helpers.fetchDefaultModelIfNeeded(gpa, io, err_file, out, environ_map, model_path);
     const engine = embed_mod.create(arena, io, model_path) catch |err| {
-        try embed_helpers.reportEmbedError(arena, io, err_file, model_path, err);
+        try embed_helpers.reportEmbedError(arena, io, style, err_file, model_path, err);
         return err;
     };
     defer engine.deinit();
@@ -109,7 +110,7 @@ pub fn run(
         return error.EmbeddingsUnavailable;
     }
     const qv = engine.embed(arena, &.{question}, .query) catch |err| {
-        try embed_helpers.reportEmbedError(arena, io, err_file, model_path, err);
+        try embed_helpers.reportEmbedError(arena, io, style, err_file, model_path, err);
         return err;
     };
     defer {
