@@ -216,24 +216,29 @@ segment (or is the journal head for provenance).
 
 ## 9. LLM view (deterministic renderer)
 
-Input: a journal that passed `verify`. Output (UTF-8, `\n` line endings, exactly one
-trailing newline; empty journal → empty output):
+Input: a journal that passed `verify`, optionally restricted to a civil-day range
+(start inclusive, end exclusive). Output (UTF-8, `\n` line endings, exactly one
+trailing newline; an empty journal or a range with no matching entries → empty
+output):
 
 ```
-# zephyr: seq <first>..<last> head=<head_hash_hex>
-# <YYYY-MM-DD> <DDD>
-HH:MM [tag1][tag2] text
-HH:MM (edited) [tag1] text
-HH:MM [redacted]
+<YYYY-MM-DD> <DDD>
+  <seq> HH:MM [tag1][tag2] text
+  <seq> HH:MM (edited) [tag1] text
+  <seq> HH:MM [redacted]
+
+<YYYY-MM-DD> <DDD>
+  <seq> HH:MM text
 ```
 
 Rules (all fixed; output is byte-identical for the same input):
 
-1. Line 1 is the provenance header: first/last global `seq` and the journal head
-   (final `record_hash`), lowercase hex.
-2. Entries are grouped by **local civil date**: `date = timestamp_ms + tz_offset_min`
+1. Entries are grouped by **local civil date**: `date = timestamp_ms + tz_offset_min`
    interpreted as an offset from UTC (not a full IANA zone). Days are sorted ascending;
-   `<DDD>` is `Mon`…`Sun` (English, fixed).
+   `<DDD>` is `Mon`…`Sun` (English, fixed). Days are separated by one blank line.
+2. Every entry line is prefixed with the entry's global `seq` (bare decimal, no
+   padding) and two spaces — the seq is the citation handle for `edit`/`rm`/`redact`
+   and for AI answers.
 3. Within a day, entries are sorted by `(timestamp_ms, seq)`.
 4. The time is the entry's local `HH:MM` (24-hour, zero-padded) from its own
    `timestamp_ms` and `tz_offset_min`.
@@ -248,7 +253,9 @@ Rules (all fixed; output is byte-identical for the same input):
 9. `private` entries are never included.
 10. Records that are not entry-type (amendments, tombstones, redactions, checkpoints)
     never appear as their own lines.
-11. No other lines, no padding, no trailing spaces.
+11. No other lines, no padding, no trailing spaces. The journal head is not part of
+    the view: the fingerprint lives in the on-disk derived artifacts and behind
+    `zephyr verify --head`.
 
 ## 10. Checkpoints and signatures (Phase 5)
 

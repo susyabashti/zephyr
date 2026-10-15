@@ -5,7 +5,7 @@
 //!   - the initialize/ping/tools handshake and lifecycle enforcement;
 //!   - get_entries and search respect the view rules (private excluded,
 //!     redacted marker, case-insensitive search, limit + truncation note);
-//!   - every response carries the provenance line;
+//!   - results carry no provenance line (clean view);
 //!   - a corrupted chain is flagged by verify_status and every data tool
 //!     refuses;
 //!   - add_entry is absent by default, cannot be enabled from a request,
@@ -166,18 +166,6 @@ fn rpcErrorCode(allocator: Allocator, response: []const u8) Allocator.Error!i64 
     return v.object.get("error").?.object.get("code").?.integer;
 }
 
-fn headOf(allocator: Allocator, journal: *const core.journal.Journal) (Allocator.Error || core.journal.Journal.VerifyError)![]const u8 {
-    const result = try journal.verify(allocator);
-    if (!result.ok) std.debug.panic("fixture journal should verify", .{});
-    const digits = "0123456789abcdef";
-    const out = try allocator.alloc(u8, result.head.len * 2);
-    for (result.head, 0..) |b, i| {
-        out[i * 2] = digits[b >> 4];
-        out[i * 2 + 1] = digits[b & 0x0F];
-    }
-    return out;
-}
-
 // ---------------------------------------------------------------- tests
 
 test "phase 6: handshake, capabilities, and lifecycle" {
@@ -280,25 +268,21 @@ test "phase 6: get_entries serves the date and hides private and redacted conten
     const text = try toolText(allocator, resp);
     try std.testing.expect(!(try isToolError(allocator, resp)));
 
-    // Provenance line first (spec/mcp.md section 3), then the view.
-    try std.testing.expect(contains(text, "# zephyr: seq 0..4 head="));
-    try std.testing.expect(contains(text, "# 2026-01-01 Thu"));
-    try std.testing.expect(contains(text, "01:00 [work] shipped the auth fix"));
-    try std.testing.expect(contains(text, "03:00 [redacted]"));
-    try std.testing.expect(contains(text, "04:00 walked the dog"));
+    // The clean view: no provenance line (spec/mcp.md section 3).
+    try std.testing.expect(contains(text, "2026-01-01 Thu"));
+    try std.testing.expect(contains(text, "  0  01:00 [work] shipped the auth fix"));
+    try std.testing.expect(contains(text, "  2  03:00 [redacted]"));
+    try std.testing.expect(contains(text, "  3  04:00 walked the dog"));
+    try std.testing.expect(!contains(text, "# zephyr:"));
     // Private and redacted content never appears.
     try std.testing.expect(!contains(text, "PRIVATE-MCP-MARKER-4d7e"));
     try std.testing.expect(!contains(text, "[priv]"));
     try std.testing.expect(!contains(text, "sensitive meeting notes"));
 
-    // A verified journal with no entries in range is served as the
-    // provenance line alone.
+    // A verified journal with no entries in range renders empty.
     const resp2 = try f.send(allocator, try line(allocator, "6", "tools/call", try allocator.print("{{\"name\":\"get_entries\",\"arguments\":{s}}}", .{"{\"from\":\"2026-01-02\"}"})));
     const text2 = try toolText(allocator, resp2);
-    const head = try headOf(allocator, f.journal);
-    defer allocator.free(head);
-    const want = try allocator.print("# zephyr: seq 0..4 head={s}\n", .{head});
-    try std.testing.expectEqualStrings(want, text2);
+    try std.testing.expectEqualStrings("", text2);
 }
 
 test "phase 6: search is case-insensitive, respects limit, never matches private" {
@@ -316,16 +300,16 @@ test "phase 6: search is case-insensitive, respects limit, never matches private
     // "the" matches two entries (seq 0 and seq 3); limit 1 truncates.
     const resp = try f.send(allocator, try line(allocator, "7", "tools/call", try allocator.print("{{\"name\":\"search\",\"arguments\":{s}}}", .{"{\"query\":\"THE\",\"limit\":1}"})));
     const text = try toolText(allocator, resp);
-    try std.testing.expect(contains(text, "# zephyr: seq 0..4 head="));
-    try std.testing.expect(contains(text, "# 1 match for \"THE\""));
-    try std.testing.expect(contains(text, "0000  2026-01-01 01:00  [work] shipped the auth fix"));
+    try std.testing.expect(contains(text, "1 match for \"THE\""));
+    try std.testing.expect(contains(text, "0  2026-01-01 01:00  [work] shipped the auth fix"));
     try std.testing.expect(!contains(text, "walked the dog"));
-    try std.testing.expect(contains(text, "1 more match(es) not shown"));
+    try std.testing.expect(contains(text, "1 more match not shown"));
+    try std.testing.expect(!contains(text, "# zephyr:"));
 
     // Private content is unmatchable.
     const resp2 = try f.send(allocator, try line(allocator, "8", "tools/call", try allocator.print("{{\"name\":\"search\",\"arguments\":{s}}}", .{"{\"query\":\"PRIVATE-MCP-MARKER\"}"})));
     const text2 = try toolText(allocator, resp2);
-    try std.testing.expect(contains(text2, "# 0 matches for \"PRIVATE-MCP-MARKER\""));
+    try std.testing.expect(contains(text2, "0 matches for \"PRIVATE-MCP-MARKER\""));
     try std.testing.expect(!contains(text2, "PRIVATE-MCP-MARKER-4d7e"));
 
     // Argument rejections are -32602, not tool errors.
@@ -348,9 +332,9 @@ test "phase 6: verify_status reports state; corruption is flagged and refused" {
     const status_line = try line(allocator, "10", "tools/call", "{\"name\":\"verify_status\"}");
     const status_resp = try f.send(allocator, status_line);
     const status_text = try toolText(allocator, status_resp);
-    try std.testing.expect(contains(status_text, "# zephyr: seq 0..4 head="));
-    try std.testing.expect(contains(status_text, "ok: 5 record(s)"));
-    try std.testing.expect(contains(status_text, ", 1 redacted"));
+    try std.testing.expect(contains(status_text, "ok \u{B7} 5 records"));
+    try std.testing.expect(contains(status_text, " \u{B7} 1 redacted"));
+    try std.testing.expect(!contains(status_text, "# zephyr:"));
 
     // Corrupt record 0's stored record_hash (the block's leading 32 bytes),
     // the way Phase 4 corrupts the file.
@@ -366,7 +350,7 @@ test "phase 6: verify_status reports state; corruption is flagged and refused" {
     // verify_status reports the failure (isError, no provenance line).
     const status2_resp = try f.send(allocator, status_line);
     const status2_text = try toolText(allocator, status2_resp);
-    try std.testing.expect(contains(status2_text, "FAIL: 2026-01.zph seq 0"));
+    try std.testing.expect(contains(status2_text, "\u{2717} 2026-01.zph seq 0"));
     try std.testing.expect(!contains(status2_text, "# zephyr:"));
     try std.testing.expect(try isToolError(allocator, status2_resp));
 
@@ -374,7 +358,7 @@ test "phase 6: verify_status reports state; corruption is flagged and refused" {
     const entries_resp = try f.send(allocator, try line(allocator, "11", "tools/call", try allocator.print("{{\"name\":\"get_entries\",\"arguments\":{s}}}", .{"{\"from\":\"2026-01-01\"}"})));
     const entries_text = try toolText(allocator, entries_resp);
     try std.testing.expect(contains(entries_text, "journal failed verify"));
-    try std.testing.expect(contains(entries_text, "FAIL: 2026-01.zph seq 0"));
+    try std.testing.expect(contains(entries_text, "\u{2717} 2026-01.zph seq 0"));
     try std.testing.expect(!contains(entries_text, "shipped the auth fix"));
     try std.testing.expect(try isToolError(allocator, entries_resp));
 
@@ -382,7 +366,7 @@ test "phase 6: verify_status reports state; corruption is flagged and refused" {
     try core.segment.writeAtomic(d, io, seg_name, pristine);
     const status3_resp = try f.send(allocator, status_line);
     const status3_text = try toolText(allocator, status3_resp);
-    try std.testing.expect(contains(status3_text, "ok: 5 record(s)"));
+    try std.testing.expect(contains(status3_text, "ok \u{B7} 5 records"));
 }
 
 test "phase 6: add_entry is gated; enabled it appends a real entry" {
@@ -410,18 +394,18 @@ test "phase 6: add_entry is gated; enabled it appends a real entry" {
     _ = try w.handshake(allocator, "2025-06-18");
     const add_resp = try w.send(allocator, try line(allocator, "13", "tools/call", try allocator.print("{{\"name\":\"add_entry\",\"arguments\":{s}}}", .{"{\"text\":\"MCP-WRITE-MARKER-7e2a\",\"tags\":[\"mcp\"]}"})));
     const add_text = try toolText(allocator, add_resp);
-    try std.testing.expect(contains(add_text, "logged seq 5"));
-    try std.testing.expect(contains(add_text, "# zephyr: seq 0..5 head="));
+    try std.testing.expect(contains(add_text, "logged seq 5\n"));
+    try std.testing.expect(!contains(add_text, "# zephyr:"));
     try std.testing.expect(!(try isToolError(allocator, add_resp)));
 
     // The new entry is searchable (search has no date filter).
     const search_resp = try w.send(allocator, try line(allocator, "14", "tools/call", try allocator.print("{{\"name\":\"search\",\"arguments\":{s}}}", .{"{\"query\":\"MCP-WRITE-MARKER\"}"})));
     const search_text = try toolText(allocator, search_resp);
-    try std.testing.expect(contains(search_text, "0005  "));
+    try std.testing.expect(contains(search_text, "5  "));
     try std.testing.expect(contains(search_text, "[mcp] MCP-WRITE-MARKER-7e2a"));
 }
 
-test "phase 6: get_profile serves the document or its absence" {
+test "phase 6: get_profile renders the computed profile with the notes presentation" {
     const gpa = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -435,17 +419,19 @@ test "phase 6: get_profile serves the document or its absence" {
 
     const profile_line = try line(allocator, "15", "tools/call", "{\"name\":\"get_profile\"}");
 
-    // Missing: a note, still with the provenance line, and the notes
-    // section (Phase 7) reports its absence in one line.
+    // The fixture's computed profile: seq 0, 3 visible, seq 2 redacted, the
+    // private entry excluded — three entries, one redacted (spec/derived.md
+    // section 6). Without notes.md the body stands at column 0.
     const resp = try f.send(allocator, profile_line);
     const text = try toolText(allocator, resp);
-    try std.testing.expect(contains(text, "# zephyr: seq 0..4 head="));
-    try std.testing.expect(contains(text, "no profile document at profile.md"));
-    try std.testing.expect(contains(text, "# notes"));
-    try std.testing.expect(contains(text, "(no notes)"));
+    try std.testing.expect(contains(text, "3 entries \u{B7} 2026-01-01 onward (1 redacted)"));
+    try std.testing.expect(contains(text, "most active        2026-01"));
+    try std.testing.expect(contains(text, "tags               work"));
+    try std.testing.expect(contains(text, "people and places  \u{2014}"));
+    try std.testing.expect(!contains(text, "# zephyr:"));
 
-    // Present: the document content after the provenance line, then the
-    // user's notes under a heading.
+    // With notes.md: the notes come first, then `about you` with the body.
+    // A user-placed profile.md is ignored — the server renders from the log.
     const d = try Dir.openDirAbsolute(io, f.journal.path, .{});
     defer Dir.close(d, io);
     var file = try Dir.createFile(d, io, "profile.md", .{});
@@ -456,11 +442,10 @@ test "phase 6: get_profile serves the document or its absence" {
     notes_file.close(io);
     const resp2 = try f.send(allocator, profile_line);
     const text2 = try toolText(allocator, resp2);
-    try std.testing.expect(contains(text2, "# zephyr: seq 0..4 head="));
-    try std.testing.expect(contains(text2, "# Profile"));
-    try std.testing.expect(contains(text2, "- building Zephyr in Zig"));
-    try std.testing.expect(contains(text2, "# notes"));
-    try std.testing.expect(contains(text2, "I live in Berlin."));
+    try std.testing.expect(contains(text2, "notes\n  I live in Berlin."));
+    try std.testing.expect(contains(text2, "about you"));
+    try std.testing.expect(contains(text2, "3 entries \u{B7} 2026-01-01 onward (1 redacted)"));
+    try std.testing.expect(!contains(text2, "# Profile"));
 }
 
 test "phase 6: json-rpc edge cases over the dispatch" {
@@ -515,9 +500,10 @@ test "phase 6: get_digest validates the period" {
     try std.testing.expectEqual(@as(i64, -32602), try rpcErrorCode(allocator, bad_resp));
 
     // "week" is accepted; the fixture (2026-01-01) is not in the current
-    // week, so the result is the provenance line alone.
+    // week, so the digest display body is the empty period.
     const ok_resp = try f.send(allocator, try line(allocator, "21", "tools/call", try allocator.print("{{\"name\":\"get_digest\",\"arguments\":{s}}}", .{"{\"period\":\"week\"}"})));
     const text = try toolText(allocator, ok_resp);
-    try std.testing.expect(contains(text, "# zephyr: seq 0..4 head="));
+    try std.testing.expect(contains(text, "\u{B7} 0 entries"));
     try std.testing.expect(!contains(text, "auth fix"));
+    try std.testing.expect(!contains(text, "# zephyr:"));
 }

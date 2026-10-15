@@ -4,7 +4,7 @@ A local-first, tamper-evident journal CLI, designed from day one to be read by a
 
 Log in one command, in about three seconds. The journal is an append-only, hash-chained log: any edit, deletion, or reordering breaks the chain, and `zephyr verify` tells you exactly where. When you want external backing, sign checkpoints and anchor sealed segments with OpenTimestamps — after that, any rewrite or backdating is provable.
 
-No network is required to log. Everything an AI reads is an explicit action, and every AI-facing output carries the provenance of the verified log state it was read from.
+No network is required to log. Everything an AI reads is an explicit action — the same clean text the terminal shows, verified before it is served, and bound to the log state it was built from in the on-disk artifacts.
 
 ## Install
 
@@ -126,7 +126,7 @@ See [docs/features.md](docs/features.md) for what each one does and how it behav
 │   ├── index.zdi               # search index
 │   ├── embed.zde               # vector artifact (ZDE1), Phase 8
 │   └── digests/…digest         # period digests
-├── profile.md                  # derived profile (v1)
+├── profile.md                  # derived profile (v2)
 ├── notes.md                    # your notes; zephyr never rewrites it
 └── zephyr-key                  # 32-byte checkpoint seed, 0600
                                 # (created on first checkpoint)

@@ -159,8 +159,9 @@ pub fn build(b: *std.Build) void {
     run_cmd.step.dependOn(b.getInstallStep());
     run_cmd.addPassthruArgs();
 
-    // Tests: core unit tests (one artifact per file, since the test runner
-    // only discovers test blocks in the root file), plus the Phase 0 vector suite.
+    // Tests: unit tests (one artifact per source file; the runner discovers
+    // test blocks across each artifact's whole module), plus the Phase 0
+    // vector suite.
 
     const options = b.addOptions();
     options.addOptionPath("vectors", b.path("spec/vectors/journals.json"));
@@ -330,11 +331,17 @@ pub fn build(b: *std.Build) void {
         "src/embed/llama.zig",
         // Distribution: the model fetcher's network-free paths.
         "src/embed/fetch.zig",
+        // CLI layer: the TTY styled renderers' tests (style-off identity,
+        // SGR shape), pulled in through a shared-directory test root.
+        "src/cli/render_tests.zig",
     };
     for (core_test_files) |path| {
         const module = b.createModule(.{
             .root_source_file = b.path(path),
             .target = target,
+            // The CLI-layer files in this list import core by module name;
+            // the rest simply don't use it.
+            .imports = &.{.{ .name = "zephyr_core", .module = core }},
         });
         const core_tests = b.addTest(.{ .root_module = module });
         const run_core_tests = b.addRunArtifact(core_tests);

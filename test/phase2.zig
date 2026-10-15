@@ -56,7 +56,6 @@ test "phase 2: views, amendments, tombstones, search" {
 
     const recs0 = try journal.collectRecords(allocator);
     defer recs0.deinit();
-    const head_hex = try hexOf(allocator, &recs0.headers[6].record_hash);
 
     const day15 = try day(allocator, 2026, 1, 15);
     const day16 = try day(allocator, 2026, 1, 16);
@@ -65,45 +64,44 @@ test "phase 2: views, amendments, tombstones, search" {
 
     // ---- date views: boundaries are the entry's LOCAL day
     // 2026-01-15 (seq 0's UTC date) must be empty; its local day is 01-16.
-    try expectRender(allocator, recs0, .{ .start = day15, .end = day15 + 1 }, try prov(allocator, head_hex));
+    try expectRender(allocator, recs0, .{ .start = day15, .end = day15 + 1 }, "");
 
     const on16 =
-        \\# zephyr: seq 0..6 head=HEX
-        \\# 2026-01-16 Fri
-        \\01:45 [travel][city] first day in the city
-        \\12:30 (edited) [work][updated] second entry (amended)
+        \\2026-01-16 Fri
+        \\  0  01:45 [travel][city] first day in the city
+        \\  1  12:30 (edited) [work][updated] second entry (amended)
         \\
     ;
-    try expectRender(allocator, recs0, .{ .start = day16, .end = day16 + 1 }, try withHead(allocator, on16, head_hex));
+    try expectRender(allocator, recs0, .{ .start = day16, .end = day16 + 1 }, on16);
 
-    // 01-18 holds only the tombstoned and private entries: provenance only.
-    try expectRender(allocator, recs0, .{ .start = day18, .end = day18 + 1 }, try prov(allocator, head_hex));
+    // 01-18 holds only the tombstoned and private entries: empty.
+    try expectRender(allocator, recs0, .{ .start = day18, .end = day18 + 1 }, "");
 
     const on19 =
-        \\# zephyr: seq 0..6 head=HEX
-        \\# 2026-01-19 Mon
-        \\10:00 third entry
+        \\2026-01-19 Mon
+        \\  6  10:00 third entry
         \\
     ;
-    try expectRender(allocator, recs0, .{ .start = day19, .end = day19 + 1 }, try withHead(allocator, on19, head_hex));
+    try expectRender(allocator, recs0, .{ .start = day19, .end = day19 + 1 }, on19);
 
     // The ISO week containing Friday 01-16 starts Monday 01-12 and ends
     // before 01-19: same body as the 01-16 view.
     const monday = core.view.weekStart(day16);
     expectMonday(2026, 1, 12, monday);
-    try expectRender(allocator, recs0, .{ .start = monday, .end = monday + 7 }, try withHead(allocator, on16, head_hex));
+    try expectRender(allocator, recs0, .{ .start = monday, .end = monday + 7 }, on16);
 
     // ---- search: viewable effective text, case-insensitive
     try expectSearch(allocator, recs0, "entry",
-        \\# 2 matches for "entry"
-        \\0001  2026-01-16 12:30  [work][updated] second entry (amended)
-        \\0006  2026-01-19 10:00  third entry
+        \\2 matches for "entry"
+        \\
+        \\1  2026-01-16 12:30  [work][updated] second entry (amended)
+        \\6  2026-01-19 10:00  third entry
         \\
     );
     // The tombstoned entry ("entry to hide") and the private one are not
     // viewable, so they never match.
     try expectSearch(allocator, recs0, "hide",
-        \\# 0 matches for "hide"
+        \\0 matches for "hide"
         \\
     );
 
@@ -117,15 +115,13 @@ test "phase 2: views, amendments, tombstones, search" {
 
     const recs1 = try journal.collectRecords(allocator);
     defer recs1.deinit();
-    const head1_hex = try hexOf(allocator, &recs1.headers[7].record_hash);
     const on16_edited =
-        \\# zephyr: seq 0..7 head=HEX
-        \\# 2026-01-16 Fri
-        \\01:45 [travel][city] first day in the city
-        \\12:30 (edited) [work][final] second entry (final)
+        \\2026-01-16 Fri
+        \\  0  01:45 [travel][city] first day in the city
+        \\  1  12:30 (edited) [work][final] second entry (final)
         \\
     ;
-    try expectRender(allocator, recs1, .{ .start = day16, .end = day16 + 1 }, try withHead(allocator, on16_edited, head1_hex));
+    try expectRender(allocator, recs1, .{ .start = day16, .end = day16 + 1 }, on16_edited);
     // The original record is still present, byte for byte.
     const original = try core.records.decodePayload(allocator, recs1.payloads[1]);
     defer allocator.free(original.tags);
@@ -142,15 +138,15 @@ test "phase 2: views, amendments, tombstones, search" {
 
     const recs2 = try journal.collectRecords(allocator);
     defer recs2.deinit();
-    const head2_hex = try hexOf(allocator, &recs2.headers[8].record_hash);
-    try expectRender(allocator, recs2, .{ .start = day19, .end = day19 + 1 }, try prov8(allocator, head2_hex));
+    try expectRender(allocator, recs2, .{ .start = day19, .end = day19 + 1 }, "");
     const hidden = try core.records.decodePayload(allocator, recs2.payloads[6]);
     defer allocator.free(hidden.tags);
     try std.testing.expectEqualStrings("third entry", hidden.text);
 
     try expectSearch(allocator, recs2, "entry",
-        \\# 1 match for "entry"
-        \\0001  2026-01-16 12:30  [work][final] second entry (final)
+        \\1 match for "entry"
+        \\
+        \\1  2026-01-16 12:30  [work][final] second entry (final)
         \\
     );
 
@@ -182,28 +178,6 @@ fn expectMonday(year: u16, month: u4, day_of_month: u5, got: i64) void {
     }
 }
 
-fn prov(allocator: Allocator, head_hex: []const u8) Allocator.Error![]const u8 {
-    return try allocator.print("# zephyr: seq 0..6 head={s}\n", .{head_hex});
-}
-
-fn prov8(allocator: Allocator, head_hex: []const u8) Allocator.Error![]const u8 {
-    return try allocator.print("# zephyr: seq 0..8 head={s}\n", .{head_hex});
-}
-
-/// Substitutes the computed head hash into a golden string.
-fn withHead(allocator: Allocator, golden: []const u8, head_hex: []const u8) Allocator.Error![]const u8 {
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(allocator);
-    var from: usize = 0;
-    while (std.mem.indexOfPos(u8, golden, from, "HEX")) |at| {
-        try out.appendSlice(allocator, golden[from..at]);
-        try out.appendSlice(allocator, head_hex);
-        from = at + 3;
-    }
-    try out.appendSlice(allocator, golden[from..]);
-    return out.toOwnedSlice(allocator);
-}
-
 fn expectRender(allocator: Allocator, recs: core.journal.Journal.RecordSet, range: core.view.DayRange, want: []const u8) ExpectError!void {
     const got = try core.view.renderRange(allocator, recs.headers, recs.payloads, range);
     defer allocator.free(got);
@@ -228,14 +202,4 @@ fn expectSearch(allocator: Allocator, recs: core.journal.Journal.RecordSet, quer
         });
         return error.TestExpectedEqual;
     }
-}
-
-fn hexOf(allocator: Allocator, hash: []const u8) Allocator.Error![]const u8 {
-    const digits = "0123456789abcdef";
-    const out = try allocator.alloc(u8, hash.len * 2);
-    for (hash, 0..) |b, i| {
-        out[i * 2] = digits[b >> 4];
-        out[i * 2 + 1] = digits[b & 0x0F];
-    }
-    return out;
 }

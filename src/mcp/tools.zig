@@ -52,23 +52,24 @@ const tools_all = [_]Tool{
     },
     .{
         .name = "get_profile",
-        .description = "The user-maintained profile document at journal/profile.md, with the " ++
-            "provenance line. Reports a missing profile instead of failing.",
+        .description = "The derived profile of the journal (entry count, most active month, " ++
+            "top tags, people and places) plus the user's notes when notes.md exists. " ++
+            "Computed from the verified log; read-only.",
         .input_schema = "{\"type\":\"object\",\"properties\":{}}",
     },
     .{
         .name = "verify_status",
-        .description = "Chain integrity of the journal: ok with record count, redaction count, " ++
-            "and head hash, or the exact failure (file, seq, field, detail).",
+        .description = "Chain integrity of the journal: ok with record count and redaction " ++
+            "count, or the exact failure (file, seq, field, detail).",
         .input_schema = "{\"type\":\"object\",\"properties\":{}}",
     },
     .{
         .name = "get_context",
         .description = "Deterministic context pack for answering a question from the journal: " ++
-            "provenance, the question verbatim, the derived profile, the user's notes, the " ++
-            "period digest, keyword matches, and an instruction to answer only from the pack. " ++
-            "from/to are optional YYYY-MM-DD dates bounding the period (a single date covers " ++
-            "that day; no dates: a YYYY-MM-DD in the question, else the current week).",
+            "the question verbatim, the derived profile, the user's notes, the period digest, " ++
+            "matching entries, and an instruction to answer only from the pack. from/to are " ++
+            "optional YYYY-MM-DD dates bounding the period (a single date covers that day; no " ++
+            "dates: a YYYY-MM-DD in the question, else the current week). Read-only.",
         .input_schema = "{\"type\":\"object\",\"properties\":{\"question\":{\"type\":\"string\",\"description\":\"The question to answer from the journal.\"},\"from\":{\"type\":\"string\",\"description\":\"Period start date, YYYY-MM-DD (optional).\"},\"to\":{\"type\":\"string\",\"description\":\"Period end date, YYYY-MM-DD, inclusive (optional).\"}},\"required\":[\"question\"]}",
     },
     .{
@@ -257,11 +258,11 @@ pub const CallError = Allocator.Error || journal_mod.Journal.VerifyError || jour
 pub fn execute(arena: Allocator, io: Io, journal: *const journal_mod.Journal, call: ToolCall) CallError!Outcome {
     return switch (call) {
         .get_entries => |args| entriesInRange(arena, journal, .{ .start = args.from_day, .end = args.end_day }),
-        .get_digest => |args| entriesInRange(arena, journal, args.range),
+        .get_digest => |args| getDigest(arena, journal, args.range),
         .search => |args| searchText(arena, journal, args.query, args.limit),
         .get_profile => getProfile(arena, journal),
         .verify_status => verifyStatus(arena, journal),
-        .get_context => |args| getContext(arena, io, journal, args.question, args.range),
+        .get_context => |args| getContext(arena, journal, args.question, args.range),
         .add_entry => |args| addEntry(arena, io, journal, args),
     };
 }
@@ -287,10 +288,21 @@ fn entriesInRange(arena: Allocator, journal: *const journal_mod.Journal, range: 
     const recs = v.recs orelse return Outcome{ .text = try refuseText(arena, v.result), .is_error = true };
     defer recs.deinit();
     const rendered = try view.renderRange(arena, recs.headers, recs.payloads, range);
-    if (rendered.len > 0) return Outcome{ .text = rendered, .is_error = false };
-    // A verified journal with no entries in range still carries its
-    // provenance line (spec/mcp.md section 3).
-    return Outcome{ .text = try provenanceLine(arena, v.result), .is_error = false };
+    // A range with no entries renders empty (spec/mcp.md section 5).
+    return Outcome{ .text = rendered, .is_error = false };
+}
+
+/// The digest display body for the given period (spec/mcp.md section 5,
+/// derived.md section 5): computed in memory — the server never writes or
+/// regenerates the on-disk artifact.
+fn getDigest(arena: Allocator, journal: *const journal_mod.Journal, range: view.DayRange) CallError!Outcome {
+    const v = try verified(arena, journal);
+    const recs = v.recs orelse return Outcome{ .text = try refuseText(arena, v.result), .is_error = true };
+    defer recs.deinit();
+    const visible = try view.visibleEntries(arena, recs.headers, recs.payloads);
+    defer visible.deinit();
+    const body = try core.derived.renderDigestBody(arena, &visible, range);
+    return Outcome{ .text = body, .is_error = false };
 }
 
 fn searchText(arena: Allocator, journal: *const journal_mod.Journal, query: []const u8, limit: u64) CallError!Outcome {
@@ -304,42 +316,31 @@ fn searchText(arena: Allocator, journal: *const journal_mod.Journal, query: []co
     const truncated = matches.len > shown.len;
     const rendered = try search.render(arena, shown, query);
     const note = if (truncated)
-        try arena.print("\n({d} more match(es) not shown; raise limit or narrow the query)", .{matches.len - shown.len})
+        try arena.print("\n... {d} more {s} not shown (raise limit or narrow the query)", .{
+            matches.len - shown.len, core.view.countNoun(matches.len - shown.len, "match", "matches"),
+        })
     else
         "";
-    const text = try arena.print("{s}{s}{s}", .{
-        try provenanceLine(arena, v.result), rendered, note,
-    });
+    const text = try arena.print("{s}{s}", .{ rendered, note });
     return Outcome{ .text = text, .is_error = false };
 }
 
 fn getProfile(arena: Allocator, journal: *const journal_mod.Journal) CallError!Outcome {
     const v = try verified(arena, journal);
-    if (v.recs == null) return Outcome{ .text = try refuseText(arena, v.result), .is_error = true };
-    const prov = try provenanceLine(arena, v.result);
-    // The user's notes under a heading, so the AI can tell machine fact
-    // from user voice (spec/derived.md sections 6 and 7).
-    const notes_section = blk: {
-        const notes = journal.readJournalFile(arena, "notes.md") catch |err| switch (err) {
-            error.FileNotFound => break :blk try arena.print("# notes\n(no notes)\n", .{}),
-            else => |e| return e,
-        };
-        const newline = if (notes.len > 0 and notes[notes.len - 1] != '\n') "\n" else "";
-        break :blk try arena.print("# notes\n{s}{s}", .{ notes, newline });
-    };
-    const doc = journal.readJournalFile(arena, "profile.md") catch |err| switch (err) {
-        error.FileNotFound => return Outcome{
-            .text = try arena.print("{s}no profile document at profile.md\n{s}", .{ prov, notes_section }),
-            .is_error = false,
-        },
-        else => |e| return e,
-    };
-    const newline = if (doc.len > 0 and doc[doc.len - 1] != '\n') "\n" else "";
-    const text = try arena.print("{s}{s}{s}{s}", .{ prov, doc, newline, notes_section });
+    const recs = v.recs orelse return Outcome{ .text = try refuseText(arena, v.result), .is_error = true };
+    defer recs.deinit();
+    const visible = try view.visibleEntries(arena, recs.headers, recs.payloads);
+    defer visible.deinit();
+    // The server is read-only: the profile is computed in memory (the index
+    // is built for the call) and profile.md is never read or written
+    // (spec/mcp.md section 5).
+    const idx = try core.derived.buildIndex(arena, &visible, v.result.head, v.result.record_count);
+    defer idx.deinit();
+    const text = try core.dstore.renderProfileDisplay(arena, journal, &visible, idx.entities);
     return Outcome{ .text = text, .is_error = false };
 }
 
-fn getContext(arena: Allocator, io: Io, journal: *const journal_mod.Journal, question: []const u8, range: ?view.DayRange) CallError!Outcome {
+fn getContext(arena: Allocator, journal: *const journal_mod.Journal, question: []const u8, range: ?view.DayRange) CallError!Outcome {
     const v = try verified(arena, journal);
     const recs = v.recs orelse return Outcome{ .text = try refuseText(arena, v.result), .is_error = true };
     defer recs.deinit();
@@ -349,8 +350,7 @@ fn getContext(arena: Allocator, io: Io, journal: *const journal_mod.Journal, que
     // false); the CLI's ask/derived commands are the persisting surface.
     // Hybrid retrieval is unavailable here: the server never loads a model
     // (spec/semantic.md section 6), so retrieval stays keyword-only.
-    const pack_range = try core.dstore.resolveRange(io, journal, range, question);
-    const pack = try core.dstore.contextPack(arena, journal, &visible, v.result, question, pack_range, false, null);
+    const pack = try core.dstore.contextPack(arena, journal, &visible, v.result, question, range, false, null);
     return Outcome{ .text = pack, .is_error = false };
 }
 
@@ -358,19 +358,18 @@ fn verifyStatus(arena: Allocator, journal: *const journal_mod.Journal) CallError
     const result = try journal.verify(arena);
     if (!result.ok) {
         const issue = result.issue orelse std.debug.panic("verify failed without an issue", .{});
-        const text = try arena.print("FAIL: {s} seq {d} {s}: {s}", .{
+        const text = try arena.print("\u{2717} {s} seq {d} {s}: {s}", .{
             issue.file, issue.seq, issue.field, issue.detail,
         });
         return Outcome{ .text = text, .is_error = true };
     }
     const redacted = if (result.redacted_count > 0)
-        try arena.print(", {d} redacted", .{result.redacted_count})
+        try arena.print(" \u{B7} {d} redacted", .{result.redacted_count})
     else
         "";
-    const text = try arena.print("{s}ok: {d} record(s), head {s}{s}\n", .{
-        try provenanceLine(arena, result),
+    const text = try arena.print("ok \u{B7} {d} {s}{s}\n", .{
         result.record_count,
-        try hexOf(arena, &result.head),
+        core.view.countNoun(result.record_count, "record", "records"),
         redacted,
     });
     return Outcome{ .text = text, .is_error = false };
@@ -391,8 +390,7 @@ fn addEntry(arena: Allocator, io: Io, journal: *const journal_mod.Journal, args:
             .is_error = true,
         };
     }
-    const text = try arena.print("logged seq {d}\n{s}", .{ seq, try provenanceLine(arena, after) });
-    return Outcome{ .text = text, .is_error = false };
+    return Outcome{ .text = try arena.print("logged seq {d}\n", .{seq}), .is_error = false };
 }
 
 fn parseArgs(comptime T: type, allocator: Allocator, params: ?protocol.Value) RejectError!T {
@@ -416,27 +414,10 @@ fn parseDate(s: []const u8) ?i64 {
 fn refuseText(arena: Allocator, result: journal_mod.VerifyResult) Allocator.Error![]const u8 {
     const issue = result.issue orelse std.debug.panic("verify failed without an issue", .{});
     return arena.print(
-        "journal failed verify: FAIL: {s} seq {d} {s}: {s}\n" ++
+        "journal failed verify: \u{2717} {s} seq {d} {s}: {s}\n" ++
             "data refused; the chain is invalid, run `zephyr verify` for details",
         .{ issue.file, issue.seq, issue.field, issue.detail },
     );
-}
-
-/// The LLM-view provenance line (spec/mcp.md section 3): `# zephyr:
-/// seq 0..N head=<64-hex>`, with N the last seq (0 for an empty journal).
-fn provenanceLine(arena: Allocator, result: journal_mod.VerifyResult) Allocator.Error![]const u8 {
-    const last_seq: u64 = if (result.record_count == 0) 0 else result.record_count - 1;
-    return arena.print("# zephyr: seq 0..{d} head={s}\n", .{ last_seq, try hexOf(arena, &result.head) });
-}
-
-fn hexOf(allocator: Allocator, hash: []const u8) Allocator.Error![]const u8 {
-    const digits = "0123456789abcdef";
-    const out = try allocator.alloc(u8, hash.len * 2);
-    for (hash, 0..) |b, i| {
-        out[i * 2] = digits[b >> 4];
-        out[i * 2 + 1] = digits[b & 0x0F];
-    }
-    return out;
 }
 
 test "digestRange: week, month, and December rollover" {

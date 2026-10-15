@@ -7,22 +7,23 @@ client uses. The fixture journal is rendered by test/reference.py, so the
 bytes the server serves were produced by the independent reference
 implementation, not by the Zig code under test.
 
-Checks (spec/mcp.md sections 2, 4, 5, 6, plus the Phase 7 amendment):
+Checks (spec/mcp.md sections 2, 4, 5, 6, plus the Phase 7 and Phase B
+amendments):
   - the initialize handshake (version echo, capabilities) and lifecycle;
   - tools/list advertises the six read-only tools (incl. get_context),
     never add_entry;
   - get_entries and search respect the view rules (private excluded,
-    redacted marker, provenance line first);
+    redacted marker, bare seqs, no provenance line);
   - verify-before-trust: a corrupted chain is flagged by verify_status
     and every data tool refuses; restoring the bytes restores service;
   - add_entry is a protocol error by default, and appends a real entry
     when the server was started with --allow-write (a separate process);
   - a line over 1 MiB is one parse error and the server keeps going;
-  - get_profile serves the document or its absence, plus the user's
-    notes under a # notes heading (Phase 7);
-  - get_context serves the deterministic context pack: provenance,
-    question, profile, notes, the period digest, matches, footer —
-    byte-identical to a second call, and period-bounded by from/to.
+  - get_profile renders the computed derived profile (never the bytes of
+    profile.md), with the user's notes first under `notes` / `about you`;
+  - get_context serves the deterministic context pack: question, profile,
+    notes, the period digest, matching entries, footer — byte-identical to
+    a second call, and period-bounded by from/to.
 
 Usage:
   python3 test/mcpref.py --check [path-to-zephyr]
@@ -179,8 +180,7 @@ def run_gate(binary):
     # ---- read-only server ------------------------------------------
     ro_dir = os.path.join(WORK_DIR, "read")
     os.makedirs(ro_dir)
-    head = write_journal(ro_dir)
-    prov = f"# zephyr: seq 0..4 head={head.hex()}\n"
+    write_journal(ro_dir)
 
     c = McpClient(binary, ro_dir)
     try:
@@ -202,25 +202,30 @@ def run_gate(binary):
                f"add_entry gated: {resp}")
 
         resp, text = call(c, "get_entries", {"from": "2026-01-01", "to": "2026-01-01"})
-        expect(text.startswith(prov), f"get_entries: provenance line: {text!r}")
-        for needle in ("# 2026-01-01 Thu", "01:00 [work] shipped the auth fix",
-                       "03:00 [redacted]", "04:00 walked the dog"):
+        expect("2026-01-01 Thu" in text, f"get_entries: date header: {text!r}")
+        for needle in ("  0  01:00 [work] shipped the auth fix",
+                       "  2  03:00 [redacted]",
+                       "  3  04:00 walked the dog"):
             expect(needle in text, f"get_entries: missing {needle!r}: {text!r}")
+        expect("# zephyr:" not in text, f"get_entries: provenance leaked: {text!r}")
         for leaked in ("PRIVATE-MCP-MARKER-4d7e", "sensitive meeting notes", "[priv]"):
             expect(leaked not in text, f"get_entries: leaked {leaked!r}")
+        # A verified journal with no entries in range renders empty.
+        resp, text = call(c, "get_entries", {"from": "2026-01-02"})
+        expect(text == "", f"get_entries: empty range: {text!r}")
 
         resp, text = call(c, "search", {"query": "THE", "limit": 1})
-        expect("# 1 match for \"THE\"" in text, f"search: {text!r}")
-        expect("0000  2026-01-01 01:00  [work] shipped the auth fix" in text, f"search: {text!r}")
+        expect('1 match for "THE"' in text, f"search: {text!r}")
+        expect("0  2026-01-01 01:00  [work] shipped the auth fix" in text, f"search: {text!r}")
         expect("walked the dog" not in text, f"search: limit ignored: {text!r}")
-        expect("1 more match(es) not shown" in text, f"search: {text!r}")
+        expect("1 more match not shown" in text, f"search: {text!r}")
         resp, text = call(c, "search", {"query": "PRIVATE-MCP-MARKER"})
-        expect("# 0 matches for \"PRIVATE-MCP-MARKER\"" in text, f"search private: {text!r}")
+        expect('0 matches for "PRIVATE-MCP-MARKER"' in text, f"search private: {text!r}")
 
         resp, text = call(c, "verify_status")
-        expect(text.startswith(prov), f"verify_status: provenance: {text!r}")
-        expect("ok: 5 record(s)" in text, f"verify_status: {text!r}")
-        expect(", 1 redacted" in text, f"verify_status: {text!r}")
+        expect("ok \u00b7 5 records" in text, f"verify_status: {text!r}")
+        expect(" \u00b7 1 redacted" in text, f"verify_status: {text!r}")
+        expect("# zephyr:" not in text, f"verify_status: provenance leaked: {text!r}")
 
         # Corrupt record 0's stored record_hash (byte 30+3 of the file) —
         # the same corruption as the phase 6 in-process test.
@@ -234,16 +239,17 @@ def run_gate(binary):
 
         resp, text = call(c, "verify_status")
         expect(resp.get("result", {}).get("isError") is True, f"corrupt verify_status: {resp}")
-        expect("FAIL: 2026-01.zph seq 0" in text, f"corrupt verify_status: {text!r}")
+        expect("\u2717 2026-01.zph seq 0" in text, f"corrupt verify_status: {text!r}")
         expect("# zephyr:" not in text, f"corrupt verify_status: provenance leaked: {text!r}")
         resp, text = call(c, "get_entries", {"from": "2026-01-01"})
         expect("journal failed verify" in text, f"corrupt get_entries: {text!r}")
+        expect("\u2717 2026-01.zph seq 0" in text, f"corrupt get_entries: {text!r}")
         expect("shipped the auth fix" not in text, f"corrupt get_entries: served data: {text!r}")
 
         with open(seg_path, "wb") as f:
             f.write(data)
         resp, text = call(c, "verify_status")
-        expect("ok: 5 record(s)" in text, f"restored verify_status: {text!r}")
+        expect("ok \u00b7 5 records" in text, f"restored verify_status: {text!r}")
 
         # A line over 1 MiB is one parse error; the server keeps going.
         raw = (b'{"jsonrpc":"2.0","id":901,"method":"ping","params":{"pad":"'
@@ -256,18 +262,27 @@ def run_gate(binary):
         resp = c.request("ping")
         expect(resp.get("result") == {}, f"ping after oversized line: {resp}")
 
+        # The computed profile of the fixture: seq 0, 3 visible, seq 2
+        # redacted, the private entry excluded — three entries, one
+        # redacted. Without notes.md the body stands at column 0.
         resp, text = call(c, "get_profile")
-        expect(text.startswith(prov), f"get_profile: provenance: {text!r}")
-        expect("no profile document at profile.md" in text, f"get_profile: {text!r}")
-        expect("# notes\n(no notes)\n" in text, f"get_profile: no-notes note: {text!r}")
+        expect("3 entries \u00b7 2026-01-01 onward (1 redacted)" in text, f"get_profile: {text!r}")
+        expect("most active        2026-01" in text, f"get_profile: {text!r}")
+        expect("tags               work" in text, f"get_profile: {text!r}")
+        expect("people and places  \u2014" in text, f"get_profile: {text!r}")
+        expect("# zephyr:" not in text, f"get_profile: provenance: {text!r}")
+        # With notes.md: the notes come first under `notes`, the body under
+        # `about you`. A user-placed profile.md is ignored — the server
+        # renders from the log, never from the file.
         with open(os.path.join(ro_dir, "profile.md"), "w", encoding="utf-8") as f:
             f.write("# Profile\n- building Zephyr in Zig\n")
         with open(os.path.join(ro_dir, "notes.md"), "w", encoding="utf-8") as f:
             f.write("I live in Berlin.\n")
         resp, text = call(c, "get_profile")
-        expect("# Profile" in text, f"get_profile present: {text!r}")
-        expect("- building Zephyr in Zig" in text, f"get_profile present: {text!r}")
-        expect("# notes\nI live in Berlin.\n" in text, f"get_profile notes: {text!r}")
+        expect("notes\n  I live in Berlin." in text, f"get_profile notes: {text!r}")
+        expect("about you" in text, f"get_profile: about you: {text!r}")
+        expect("3 entries \u00b7 2026-01-01 onward (1 redacted)" in text, f"get_profile: {text!r}")
+        expect("# Profile" not in text, f"get_profile: file ignored: {text!r}")
 
         # get_context: the pack is deterministic (same bytes twice), carries
         # the fixed sections in order, and from/to bound the digest period.
@@ -275,30 +290,35 @@ def run_gate(binary):
         resp, text1 = call(c, "get_context", {"question": "anything about auth?", "from": "2026-01-01", "to": "2026-01-01"})
         resp2, text2 = call(c, "get_context", {"question": "anything about auth?", "from": "2026-01-01", "to": "2026-01-01"})
         expect(text1 == text2, f"get_context not deterministic: {text1!r} vs {text2!r}")
-        expect(text1.startswith(prov), f"get_context: provenance: {text1!r}")
-        expect("# question: anything about auth?\n" in text1, f"get_context: question: {text1!r}")
-        expect("# notes\nI live in Berlin.\n" in text1, f"get_context: notes: {text1!r}")
-        expect("# zephyr-digest: period=2026-01-01..2026-01-01" in text1,
+        expect(text1.startswith("Question: anything about auth?\n"), f"get_context: question: {text1!r}")
+        expect("Notes\n  I live in Berlin." in text1, f"get_context: notes: {text1!r}")
+        expect("Period\n" in text1, f"get_context: label: {text1!r}")
+        expect("2026-01-01 \u2013 2026-01-01 \u00b7 3 entries (1 redacted)" in text1,
                f"get_context: period: {text1!r}")
+        expect("  0  2026-01-01 01:00  [work] shipped the auth fix" in text1,
+               f"get_context: matches: {text1!r}")
+        expect("# zephyr:" not in text1, f"get_context: provenance leaked: {text1!r}")
         expect(text1.rstrip().endswith(
             "Answer using only the entries above; cite seqs; "
             "say so if the answer is not present."),
             f"get_context: footer: {text1!r}")
-        # Retrieval is exact-token (not substring): entry 0 carries "auth".
-        expect("0000  " in text1, f"get_context: matches: {text1!r}")
         expect("PRIVATE-MCP-MARKER-4d7e" not in text1, f"get_context: private leaked: {text1!r}")
         expect("sensitive meeting notes" not in text1, f"get_context: redacted leaked: {text1!r}")
-        # A stopword-only question still gets the pack, without matches.
+        # A stopword-only question without a date resolves to the current
+        # week, whose digest is the empty period, with no matches section.
         resp, text3 = call(c, "get_context", {"question": "what"})
-        expect("# 0 matches for \"what\"\n" not in text3, f"get_context: no match section expected: {text3!r}")
-        expect("# notes" in text3, f"get_context: notes: {text3!r}")
+        expect("This week" in text3, f"get_context: week label: {text3!r}")
+        expect("Matching entries" not in text3, f"get_context: no match section: {text3!r}")
+        expect("\u00b7 0 entries" in text3, f"get_context: empty period: {text3!r}")
+        expect("Notes\n  I live in Berlin." in text3, f"get_context: notes: {text3!r}")
 
         resp, _ = call(c, "get_digest", {"period": "year"})
         expect(resp.get("error", {}).get("code") == -32602, f"get_digest year: {resp}")
-        # "week" is accepted; do not assert on entry content — the fixture
-        # date (2026-01-01) may or may not fall in the current week.
+        # "week" is accepted; the fixture (2026-01-01) is not in the current
+        # week, so the digest display body is the empty period.
         resp, text = call(c, "get_digest", {"period": "week"})
-        expect(text.startswith(prov), f"get_digest week: {text!r}")
+        expect("\u00b7 0 entries" in text, f"get_digest week: {text!r}")
+        expect("# zephyr:" not in text, f"get_digest: provenance: {text!r}")
     finally:
         code = c.close()
         expect(code == 0, f"read-only server exited {code}")
@@ -317,10 +337,10 @@ def run_gate(binary):
         expect(names[-1] == "add_entry", f"write tools/list: add_entry last: {names}")
 
         resp, text = call(w, "add_entry", {"text": "MCP-REF-WRITE-9c31", "tags": ["mcp"]})
-        expect("logged seq 5" in text, f"add_entry: {text!r}")
-        expect("# zephyr: seq 0..5 head=" in text, f"add_entry: {text!r}")
+        expect("logged seq 5\n" in text, f"add_entry: {text!r}")
+        expect("# zephyr:" not in text, f"add_entry: provenance: {text!r}")
         resp, text = call(w, "search", {"query": "MCP-REF-WRITE"})
-        expect("0005  " in text, f"search new entry: {text!r}")
+        expect("5  " in text, f"search new entry: {text!r}")
         expect("[mcp] MCP-REF-WRITE-9c31" in text, f"search new entry: {text!r}")
     finally:
         code = w.close()

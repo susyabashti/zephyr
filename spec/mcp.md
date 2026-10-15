@@ -7,10 +7,16 @@ process, independent client).
 
 **Phase 7 amendment** (`spec/derived.md` section 7): the tool list grows
 from 5 to 6 read-only tools — `get_context` is added — and `get_profile`
-results now carry the user's notes under a `# notes` heading (a one-line
-note when `notes.md` is absent). `get_context` is read-only: the pack is
+results now carry the user's notes. `get_context` is read-only: the pack is
 computed in memory and the server never writes or migrates derived
-artifacts. The five pre-existing tools keep their byte-exact behavior.
+artifacts.
+
+**Display amendment (Phase B)**: results carry no provenance line (section
+3) — `get_entries`/`search`/`get_digest` serve the clean LLM view,
+`get_profile` renders the *computed* derived profile (never the bytes of
+`profile.md`), and `get_context` serves the new pack layout
+(`spec/derived.md` section 7). `verify_status` reports `ok · N records`
+or `✗ <file> seq <n> <field>: <detail>`; `add_entry` reports `logged seq N`.
 
 ## 1. Surface
 
@@ -40,35 +46,34 @@ enable or disable writing.
 
 ## 3. Provenance
 
-Every successful tool result begins with the LLM-view provenance line:
-
-    # zephyr: seq 0..N head=<64-hex>
-
-where N is the last record's seq (0 for an empty journal) and the head is
-the last record's `record_hash` (genesis hash for an empty journal) — the
-same line the LLM view renderer emits (record-format section 9). A failed
-`verify_status` carries no provenance line: the FAIL line is the report.
+Tool results carry **no** provenance line: the fingerprint of the log state
+(the head) is an integrity primitive, not reading material. It lives in the
+on-disk derived artifacts (their machine headers) and behind
+`zephyr verify --head`. Every result is still produced only from a journal
+that passed verify (section 4), so removing the printed hex changes nothing
+about what is verified.
 
 ## 4. Verify before trust
 
 Every tool (`get_entries`, `search`, `get_digest`, `get_profile`,
 `get_context`, `add_entry`) runs the full chain verify first. A journal that fails verify
 gets a tool error result (`isError: true`) naming the exact failure
-(`FAIL: <file> seq <n> <field>: <detail>`) and serves no data.
-`verify_status` reports the same state as data. Anchor and OTS checks are
-out of scope for the server; they belong to `zephyr verify`.
+(`✗ <file> seq <n> <field>: <detail>`) and serves no data. A refused data
+tool's text keeps the `journal failed verify:` prefix before the failure
+line. `verify_status` reports the same state as data. Anchor and OTS checks
+are out of scope for the server; they belong to `zephyr verify`.
 
 ## 5. Tools
 
 | Tool | Arguments | Result |
 | --- | --- | --- |
-| `get_entries` | `from` date (required), `to` date (optional, inclusive) | LLM view for [from, to] |
-| `search` | `query` string (required, non-empty), `limit` integer (optional, default 20, min 1) | Up to `limit` matches, in view order |
-| `get_digest` | `period` = `week` \| `month` (required) | LLM view of the current week (Mon-Sun) or month, in the journal's timezone |
-| `get_profile` | — | Contents of `<journal>/profile.md` (the derived profile once Phase 7 has rendered it), or a "no profile" note; the user's `notes.md` follows under a `# notes` heading (a one-line note when absent) |
-| `verify_status` | — | `ok: N record(s), head <hex>[, R redacted]`, or the FAIL line |
-| `get_context` | `question` string (required, non-empty), `from`/`to` dates (optional, `YYYY-MM-DD`) | The deterministic context pack (derived.md section 7), same bytes `zephyr ask` prints: provenance, question, derived profile, notes, period digest, keyword matches, answer footer. `from`/`to` bound the period (a single date covers that day); absent, a `YYYY-MM-DD` in the question, else the current week. Read-only: nothing is written. Phase 8: the matches are always the keyword list — the server never loads the embedding model, so the pack does not follow `ask`'s hybrid retrieval (semantic.md section 6). |
-| `add_entry` | `text` string (required, non-empty), `tags` string[] (optional) | `logged seq N` plus the post-write provenance. Only with `--allow-write`. |
+| `get_entries` | `from` date (required), `to` date (optional, inclusive) | The LLM view for [from, to] (record-format section 9); empty text when no entries fall in the range |
+| `search` | `query` string (required, non-empty), `limit` integer (optional, default 20, min 1) | A match count label, a blank line, up to `limit` match lines in view order; a truncation note when cut |
+| `get_digest` | `period` = `week` \| `month` (required) | The digest display body (derived.md section 5) for the current week (Mon-Sun) or month, in the journal's timezone |
+| `get_profile` | — | The *computed* derived profile display body (derived.md section 6), with the user's `notes.md` first under `notes` / `about you` when present (absent → the body at column 0). The server renders from the log; `profile.md` on disk is never read or written by it |
+| `verify_status` | — | `ok · N record(s)[ · R redacted]`, or `✗ <file> seq <n> <field>: <detail>` (tool error) |
+| `get_context` | `question` string (required, non-empty), `from`/`to` dates (optional, `YYYY-MM-DD`) | The deterministic context pack (derived.md section 7), same bytes `zephyr ask` prints: question, profile, notes, period digest, matching entries, answer footer. `from`/`to` bound the period (a single date covers that day); absent, a `YYYY-MM-DD` in the question, else the current week. Read-only: nothing is written. The matches are always the keyword list — the server never loads the embedding model, so the pack does not follow `ask`'s hybrid retrieval (semantic.md section 6). |
+| `add_entry` | `text` string (required, non-empty), `tags` string[] (optional) | `logged seq N`. Only with `--allow-write`. |
 
 Dates are `YYYY-MM-DD` civil dates under each entry's own local timezone
 (the view's grouping rule, record-format section 9). `from` > `to` and
@@ -79,11 +84,13 @@ tombstoned entries are omitted, redacted entries render as the
 `[redacted]` marker, and amended entries show only the latest amendment
 text. `search` never matches private or redacted content.
 
-`get_profile` reads `<journal>/profile.md` (plain text, user-maintained;
-the Phase 7 derived layer takes it over) and appends the user's `notes.md`
-under a `# notes` heading (or a one-line note when `notes.md` is absent),
-so an AI client can tell machine-fact from user-voice. The provenance line
-is included even when the profile is missing.
+`get_profile` renders the derived profile **from the verified log**
+(computed in memory — the index is rebuilt for the call, nothing is
+written), presented per derived.md section 6: the user's `notes.md` first
+under `notes`, then the profile body under `about you` (both indented two
+spaces); without `notes.md` the body stands at column 0. An empty journal
+renders `0 entries`. A `profile.md` left on disk by a pre-Phase-7 install is
+ignored until a CLI read migrates it.
 
 ## 6. Limits
 

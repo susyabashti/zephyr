@@ -170,8 +170,17 @@ tail    32     sha256 of everything above
 
 - `zephyr rank <query...> [--mode keyword|vector|hybrid] [--top N]`
   (defaults: hybrid, N=10). Verify-first like every command. One line per
-  hit: `<rank>\t<seq>\t<score, 6 decimals>\t<view line>`; a provenance line
-  first, then the hits.
+  hit, in rank order, no other lines:
+
+  ```
+  <seq>  YYYY-MM-DD HH:MM  [tag]... text   <score, 3 decimals>
+  ```
+
+  The line is the entry's view line (section 6, record-format) with the
+  bare `seq` first and the score last, separated from the text by three
+  spaces and wrapped in parentheses: `0  2026-01-15 19:56  text   (1.000)`. The
+  seq is the first whitespace-delimited field — the gate's parser depends
+  on it. Plain text when piped; on a TTY the score is dimmed.
 - `zephyr derived rebuild --embeddings` — builds `embed.zde`: loads the
   model once, embeds visible entries in seq order, writes atomically.
   Without the flag, behavior is unchanged and no model is loaded.

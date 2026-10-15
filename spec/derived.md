@@ -100,23 +100,45 @@ One text artifact per period, where a period is an explicit inclusive
 date range `start..end` (civil dates, view grouping rules) — no ISO week
 numbers, no timezone inference beyond the entries' own offsets.
 
+The **on-disk artifact** is a machine header (the head binding is the
+staleness check) followed by the display body:
+
 ```
 # zephyr-digest: period=2026-01-05..2026-01-11 range=seq 12..30 head=<64-hex>
-15 entries (3 redacted)
-tags: work 4, home 2, zephyr 2, ...        # count desc, then name asc
-top words: zephyr 6, anchor 4, ...          # count desc, then word asc, 20 max
+2026-01-05 – 2026-01-11 · 15 entries (3 redacted)
+
+tags  work 4, home 2, zephyr 2          # count desc, then name asc
+top words  zephyr 6, anchor 4           # count desc, then word asc, 10 max
 ```
 
-- Content is a pure function of (verified log, range): entry count, redacted
-  count, tag histogram, and top-20 **token counts over the period's own
-  entries** (the shared tokenizer; the index is not consulted, since it
-  stores seqs, not counts). No entry text beyond markers — the entries
-  themselves come from `get_entries`/the view when needed.
-- The header line carries the provenance triple (period, seq range of the
-  entries it covers, head at build). `recap` and `get_context` serve the
-  stored artifact when fresh, regenerate when stale.
+The **display body** — everything after the header — is what `zephyr recap`
+and `get_digest` render and what `get_context` embeds:
+
+```
+2026-01-05 – 2026-01-11 · 15 entries (3 redacted)
+
+tags  work 4, home 2, zephyr 2
+top words  zephyr 6, anchor 4
+```
+
+- Line 1: the period (civil dates joined by ` – `, U+2013), a `·`, the entry
+  count in singular/plural (`1 entry` / `15 entries`), and ` (R redacted)`
+  when the period contains redacted entries. An empty period renders line 1
+  alone, with `0 entries`.
+- `tags`: one `name count` pair per distinct tag (count = entries carrying
+  it), count desc then name asc.
+- `top words`: **token counts over the period's own entries** (the shared
+  tokenizer; the index is not consulted, since it stores seqs, not counts),
+  count desc then word asc, **at most 10**.
+- The tag and word lines follow the count line after one blank line; a line
+  is absent when it has no items. No entry text — the entries themselves
+  come from `get_entries`/the view when needed.
+- The header carries the provenance triple (period, seq range of the entries
+  it covers, head at build). `recap` and `get_context` serve the stored
+  artifact when fresh, regenerate when stale; the display never shows the
+  header.
 - Bounded: one line per tag (the format already bounds tags per entry) plus
-  20 word lines.
+  at most 10 word lines.
 
 ## 6. Profile
 
@@ -124,38 +146,60 @@ The profile is **derived, not edited** — the same artifact class as a
 digest. It is the standing "who is this person, per their own log" context,
 and like all derived data it is a pure function of the verified log.
 
-`<journal>/profile.md` (path unchanged from Phase 6), first line a version
-header, then a bounded set of sections — each at most N lines, N frozen:
+`<journal>/profile.md` (path unchanged from Phase 6) is the machine
+artifact: a version header, then the display body:
 
 ```
-# zephyr-profile: v1 range=seq 0..120 head=<64-hex>
-121 entries, 2026-01-01..2026-03-15 (2 redacted)
-most active: 2026-02 (18 entries)
-tags: work 22, zephyr 14, home 9           # kind-0 entities, top 10, count desc then name asc
-people and places: Alice 9, Berlin 4, ...  # kind-1 entities, top 10
+# zephyr-profile: v2 range=seq 0..120 head=<64-hex>
+121 entries · 2026-01-01 onward (2 redacted)
+
+most active        2026-02
+tags               work, zephyr, home
+people and places  Alice, Berlin
 ```
 
-`v` is the profile format version (1); `range` spans the journal's seqs
-(`none` for an empty journal); a section is omitted when it has no items.
+The **display body** — everything after the header — is what `zephyr
+profile` and `get_profile` render:
 
+```
+121 entries · 2026-01-01 onward (2 redacted)
+
+most active        2026-02
+tags               work, zephyr, home
+people and places  Alice, Berlin
+```
+
+- `v` is the profile format version (2); `range` spans the journal's seqs
+  (`none` for an empty journal).
+- Line 1: the entry count in singular/plural, a `·`, the first entry's date,
+  ` onward`, and ` (R redacted)` when redacted entries exist.
+- The stats block follows after one blank line: `labels padded to the longest
+  label plus two spaces` (minimum width 2), one line per stat — `most active`
+  (the fullest month, earliest wins ties), `tags` (kind-0 entities, top 10,
+  count desc then name asc), `people and places` (kind-1 entities, top 10).
+  Entity names only, no per-entity counts; an empty stat renders `—`
+  (U+2014). An empty journal body is `0 entries` (no stats block).
+- **Presentation** (`zephyr profile`, `get_profile`): when `notes.md`
+  exists, the notes come first — `notes`, the file's content verbatim with
+  each line indented two spaces, a blank line, `about you`, the display body
+  indented two spaces. Without `notes.md` the section is omitted entirely and
+  the body stands at column 0. So an AI client can tell user-voice from
+  machine-fact.
 - Regenerated on read when the head has moved; never served flagged-as-
-  stale. An empty journal renders just the header and a `0 entries` line.
-- **`notes.md`** (journal root) is the user's own words about themselves —
-  free text, no format requirements, no version header, **zephyr never
-  writes or rewrites it**. `zephyr profile` and `get_profile` present the
-  derived profile followed by the notes under a `# notes` heading (or a
-  single-line note when absent), so an AI client can tell machine-fact from
-  user-voice.
+  stale. The display always renders from the computed data, never from the
+  file's bytes.
 - **Migration.** On the first persisting render after Phase 7, if
-  `profile.md` exists and lacks the version header, its current content is
+  `profile.md` exists and lacks a version header, its current content is
   appended verbatim to `notes.md` (blank-line separated when notes already
   exist) or written as `notes.md`, and the derived profile is written in
   its place. A user's hand-written profile is never destroyed — it becomes
-  their notes. The `# notes` heading is presentation only: it is never
-  written into `notes.md`. The move happens once, is atomic (temp +
-  rename), and is idempotent (a versioned header means "already
-  migrated"). The MCP server never migrates: it serves the derived profile
-  in memory and leaves the legacy document in place until a CLI read
+  their notes. The notes presentation is never written into `notes.md`. The
+  move happens once, is atomic (temp + rename), and is idempotent: a file
+  starting with the v1 or the v2 version header is treated as versioned and
+  left alone. A v1 file is not legacy — it is simply stale: `loadFresh`
+  requires the v2 prefix, so the next read rewrites it as v2 without
+  migrating. The MCP server never migrates: it renders the derived profile
+  in memory and leaves the document in place until a CLI read rewrites or
   migrates it.
 
 ## 7. Commands and MCP
@@ -163,22 +207,50 @@ people and places: Alice 9, Berlin 4, ...  # kind-1 entities, top 10
 `zephyr ask [from:to] <question...>` — deterministic context pack on stdout;
 **no LLM, no network in zephyr**. It is the retrieval half of RAG; the user's
 AI answers from the pack. `from:to` is `YYYY-MM-DD` or
-`YYYY-MM-DD:YYYY-MM-DD` (a bare date covers that day):
+`YYYY-MM-DD:YYYY-MM-DD` (a bare date covers that day). The pack is one
+document; sections are separated by one blank line, and every indented block
+indents its non-empty lines by two spaces (blank lines stay empty):
+
+```
+Question: <question verbatim>
+
+Your profile
+  <profile display body, section 6>
+
+Notes
+  <notes.md verbatim, indented>            # only when notes.md exists
+
+This week                                   # or: Period
+  <digest display body, section 5>
+
+Matching entries                            # only when there are matches
+  <seq>  YYYY-MM-DD HH:MM  [tag]... text
+
+Answer using only the entries above; cite seqs; say so if the answer is not present.
+```
 
 1. Verify; refuse on a bad chain (same as every command).
-2. Provenance line, then `# question: <question verbatim>`.
-3. Derived profile; then `# notes` if `notes.md` exists.
-4. Digest for the covered period — the explicit `from:to`, or the day of an
-   ISO date `YYYY-MM-DD` occurring in the question, or the current week
-   (Mon-Sun) in the journal's timezone.
-5. Keyword retrieval: tokenize the question (section 3 tokenizer minus the
-   question stopword list), look up the index (brute-force token scan when
-   the index is missing), scoped to the section-4 period when one was
-   resolved (all-time otherwise); take the union of matching seqs, render
-   those entries in view order, capped (default 8 KiB of view text, with a
-   truncation note).
-6. Footer: `Answer using only the entries above; cite seqs; say so if the
+2. `Question: <question verbatim>`.
+3. `Your profile`: the profile display body (section 6), computed — the
+   on-disk artifact is only kept fresh for `derived status` and inspection.
+4. `Notes`: `notes.md` verbatim, when it exists; the section is omitted
+   otherwise.
+5. The digest display body for the covered period — the explicit `from:to`,
+   or the day of an ISO date `YYYY-MM-DD` occurring in the question, or the
+   current week (Mon-Sun) in the journal's timezone — under the label
+   `This week` only when the current-week fallback fired, else `Period`.
+6. `Matching entries`: keyword retrieval (section 3 tokenizer minus the
+   question stopword list; the index, or a brute-force token scan when the
+   index is missing), scoped to the step-5 period; the union of matching
+   seqs rendered in view order as `  <seq>  YYYY-MM-DD HH:MM  [tag]... text`
+   lines, no count label, capped at 8 KiB of match text with a truncation
+   note; the section is omitted when there are no matches.
+7. Footer: `Answer using only the entries above; cite seqs; say so if the
    answer is not present.`
+
+The pack carries no provenance line: the fingerprint of the log state is an
+integrity primitive, visible in `zephyr verify --head` and in the on-disk
+artifacts.
 
 `zephyr recap [start..end]` — the digest for the period (default: current
 week/month per the `get_digest` rules); regenerates the stored artifact when

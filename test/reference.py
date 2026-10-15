@@ -394,7 +394,9 @@ def civil_date_from_ms(ts_ms, tz_offset_min):
 
 
 def render_view(journal, head):
-    """Spec section 9. Returns the exact output string ("" for an empty journal)."""
+    """Spec section 9. Returns the exact output string ("" for an empty
+    journal). The head is no longer part of the view (Phase B); the parameter
+    is kept for the call sites."""
     recs = []
     seq = 0
     for seg in journal["segments"]:
@@ -441,14 +443,18 @@ def render_view(journal, head):
         lines.append((day, rec["timestamp_ms"], seq, line))
     lines.sort(key=lambda x: (x[0], x[1], x[2]))
 
-    out = [f"# zephyr: seq {recs[0][0]}..{recs[-1][0]} head={head.hex()}"]
+    out = []
     current_day = None
-    for day, _, _, line in lines:
+    for day, _, seq, line in lines:
         if day != current_day:
+            if current_day is not None:
+                out.append("")
             d = date_from_epoch_day(day)
-            out.append(f"# {d.year:04d}-{d.month:02d}-{d.day:02d} {WEEKDAYS[d.weekday()]}")
+            out.append(f"{d.year:04d}-{d.month:02d}-{d.day:02d} {WEEKDAYS[d.weekday()]}")
             current_day = day
-        out.append(line)
+        out.append(f"  {seq}  {line}")
+    if not out:
+        return ""
     return "\n".join(out) + "\n"
 
 

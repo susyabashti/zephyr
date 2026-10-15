@@ -43,18 +43,16 @@ zephyr log -t work "shipped v2 to client"
 # ✓ logged seq 1
 
 zephyr today
-# # zephyr: seq 0..1 head=…
-# # 2026-10-14 Wed
-# 09:32 fixed the auth bug, finally
-# 10:05 [work] shipped v2 to client
+# 2026-10-14 Wed
+#   0  09:32 fixed the auth bug, finally
+#   1  10:05 [work] shipped v2 to client
 ```
 
 `today`, `yesterday`, `week`, and `on YYYY-MM-DD` show the entries for that
 period, rendered by the same deterministic renderer the LLM view uses: one
-date header per day, times in the local timezone, the latest text of an
-amended entry (marked `(edited)`), `[redacted]` markers where content was
-removed, and a provenance line naming the log state the view was rendered
-from.
+date header per day, each entry with its sequence number and time in the
+local timezone, the latest text of an amended entry (marked `(edited)`),
+and a `[redacted]` marker where content was removed.
 
 Search finds entries:
 
@@ -66,13 +64,14 @@ zephyr search "auth"
 
 ```sh
 zephyr verify
-# ✓ verified · 2 records · head …
+# ✓ verified · 2 records
 ```
 
 `verify` re-reads every segment, re-walks the hash chain, and reports the
-exact record, field, and detail of any break — and exits non-zero. Every
-other command verifies before it trusts the journal, so a corrupted log
-refuses to serve instead of serving stale data.
+exact record, field, and detail of any break — and exits non-zero. Pass
+`--head` to include the log's head hash. Every other command verifies
+before it trusts the journal, so a corrupted log refuses to serve instead
+of serving stale data.
 
 ## 4. Enable semantic search (optional)
 
@@ -117,12 +116,12 @@ zephyr rank "why did the login break" --mode vector --top 5
 zephyr ask "what do you know about the auth work?"
 ```
 
-`rank` prints a provenance line and then one line per hit: rank, seq, score,
-and the entry line. `ask` prints a deterministic context pack — provenance,
-the question, your profile, `notes.md`, the period digest, and the best
-matches — that you can paste straight to your AI. If the model or artifact
-is unavailable, `ask` silently falls back to keyword matches; it never fails
-over embeddings.
+`rank` prints one line per hit and nothing else: the sequence number, date
+and time, tags, the entry text, and the score. `ask` prints a deterministic
+context pack — the question, your profile, `notes.md`, the period digest,
+and the best matches — that you can paste straight to your AI. If the model
+or artifact is unavailable, `ask` silently falls back to keyword matches;
+it never fails over embeddings.
 
 ## 5. Make it tamper-evident
 
@@ -173,9 +172,9 @@ Two ways, both verify-before-trust:
 
 The server is read-only by default and exposes `get_entries`, `search`,
 `get_digest`, `get_profile`, `verify_status`, and `get_context`. Start it
-with `--allow-write` to enable `add_entry`. Every successful result starts
-with the provenance line of the verified log state it was read from; a
-failing journal is reported as an error, never served silently.
+with `--allow-write` to enable `add_entry`. Results are the same clean text
+the CLI prints; a failing journal is reported as an error, never served
+silently.
 
 **Export** — pull the LLM view yourself, e.g. for a one-off prompt:
 

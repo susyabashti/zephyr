@@ -29,12 +29,11 @@ pub const LatestProtocolVersion: []const u8 = "2025-06-18";
 pub const OlderProtocolVersion: []const u8 = "2025-03-26";
 
 const instructions =
-    "Read-only access to a Zephyr tamper-evident journal. Every successful " ++
-    "result begins with a provenance line (# zephyr: seq 0..N head=HEX) " ++
-    "describing the verified log state it was read from. A result with " ++
-    "isError=true means the journal failed verification: do not use " ++
-    "stale or unverified data. " ++
-    "Prefer get_digest over scanning raw entries.";
+    "Read-only access to a Zephyr tamper-evident journal. Results are the " ++
+    "same clean, human-readable text the zephyr CLI prints. Every result is " ++
+    "produced only from a journal that passed verification. A result with " ++
+    "isError=true means the journal failed verification: do not use stale " ++
+    "or unverified data. Prefer get_digest over scanning raw entries.";
 
 pub const Server = struct {
     journal: *const journal_mod.Journal,
