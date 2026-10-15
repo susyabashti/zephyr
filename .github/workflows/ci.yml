@@ -32,7 +32,7 @@ jobs:
             zig-shasum: 9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - name: Install Zig ${{ env.ZIG_VERSION }} (official tarball, sha256-verified)
@@ -73,7 +73,7 @@ jobs:
       ZIG_TARBALL: zig-aarch64-macos-0.17.0.tar.xz
       ZIG_SHASUM: b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - name: Install Zig ${{ env.ZIG_VERSION }} (official tarball, sha256-verified)
@@ -96,7 +96,7 @@ jobs:
       # The key embeds the pinned sha256 (src/embed/model.zig): a changed
       # pin misses the cache, and `model fetch` re-verifies any cached file.
       - name: Embedding model (cached)
-        uses: actions/cache@v4
+        uses: actions/cache@v7
         with:
           path: ${{ runner.temp }}/.zephyr/models
           key: zephyr-embeddinggemma-300M-q8-0-a0f7b4e13c397a6e
@@ -116,7 +116,7 @@ jobs:
       ZIG_TARBALL: zig-x86_64-linux-0.17.0.tar.xz
       ZIG_SHASUM: 1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Zig ${{ env.ZIG_VERSION }} (official tarball, sha256-verified)
         run: |
           set -eu
