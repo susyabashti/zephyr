@@ -20,6 +20,16 @@ pub const Token = i32;
 pub const Pos = i32;
 pub const SeqId = i32;
 
+/// The pinned build's `enum ggml_log_level` (ggml/include/ggml.h L652).
+pub const LogLevel = struct {
+    pub const NONE: u32 = 0;
+    pub const DEBUG: u32 = 1;
+    pub const INFO: u32 = 2;
+    pub const WARN: u32 = 3;
+    pub const ERROR: u32 = 4;
+    pub const CONT: u32 = 5; // continuation of the previous log line
+};
+
 pub const PoolingNone: i32 = 0; // LLAMA_POOLING_TYPE_NONE
 pub const AttentionCausal: i32 = 0; // LLAMA_ATTENTION_TYPE_CAUSAL
 pub const FlashAttnAuto: i32 = -1; // LLAMA_FLASH_ATTN_TYPE_AUTO
@@ -53,7 +63,7 @@ pub const ModelParams = extern struct {
     lazy_mode: i32,
     main_gpu: i32,
     tensor_split: ?*const f32,
-    progress_callback: ?*const fn (f32, ?*anyopaque) bool,
+    progress_callback: ?*const fn (f32, ?*anyopaque) callconv(.c) bool,
     progress_callback_user_data: ?*anyopaque,
     kv_overrides: ?*const anyopaque,
     vocab_only: bool,
@@ -106,6 +116,40 @@ pub const ContextParams = extern struct {
     ctx_other: ?*LlamaContext,
 };
 
+/// Emission policy: the CLI's own output is the interface, so the
+/// library's INFO/DEBUG chatter (several thousand lines per model load)
+/// is dropped; WARN and above go to stderr, where they cannot mix with a
+/// command's stdout. CONT is a continuation of the previous message and
+/// goes with it. Levels the pinned build does not define fail open.
+pub fn logShouldEmit(level: u32) bool {
+    return level >= LogLevel.WARN;
+}
+
+/// C callback installed with `llama_log_set` (mirrors b11609's
+/// `ggml_log_callback`). It reads no state; the logger is global in the
+/// pinned build, so re-installing it is harmless. `std.debug.print`
+/// writes to stderr and swallows write failures, which is all the C ABI
+/// allows a log callback to do.
+pub fn logCallback(level: u32, text: [*:0]const u8, user_data: ?*anyopaque) callconv(.c) void {
+    _ = user_data;
+    if (logShouldEmit(level)) std.debug.print("{s}", .{text});
+}
+
+/// C callback for `ModelParams.progress_callback`. The library's built-in
+/// default (installed when the field is NULL) prints a line of dots to
+/// stderr while the model loads; this one says nothing and always
+/// continues (returning false would cancel the load).
+pub fn progressContinue(rate: f32, user_data: ?*anyopaque) callconv(.c) bool {
+    _ = rate;
+    _ = user_data;
+    return true;
+}
+
+/// Replaces the library's default logger (everything on stderr).
+pub extern fn llama_log_set(
+    log_callback: *const fn (u32, [*:0]const u8, ?*anyopaque) callconv(.c) void,
+    user_data: ?*anyopaque,
+) void;
 pub extern fn llama_backend_init() void;
 pub extern fn llama_model_default_params() ModelParams;
 pub extern fn llama_context_default_params() ContextParams;
@@ -154,4 +198,20 @@ test "binding: struct layouts match the C ABI" {
     try std.testing.expectEqual(@as(usize, 144), @offsetOf(ContextParams, "samplers"));
     try std.testing.expectEqual(@as(usize, 152), @offsetOf(ContextParams, "n_samplers"));
     try std.testing.expectEqual(@as(usize, 160), @offsetOf(ContextParams, "ctx_other"));
+}
+
+test "log policy: INFO and below are dropped, WARN and above pass" {
+    try std.testing.expect(!logShouldEmit(LogLevel.NONE));
+    try std.testing.expect(!logShouldEmit(LogLevel.DEBUG));
+    try std.testing.expect(!logShouldEmit(LogLevel.INFO));
+    try std.testing.expect(logShouldEmit(LogLevel.WARN));
+    try std.testing.expect(logShouldEmit(LogLevel.ERROR));
+    try std.testing.expect(logShouldEmit(LogLevel.CONT));
+    try std.testing.expect(logShouldEmit(LogLevel.CONT + 1));
+}
+
+test "silent progress callback: always continues" {
+    try std.testing.expect(progressContinue(0.0, null));
+    try std.testing.expect(progressContinue(0.5, null));
+    try std.testing.expect(progressContinue(1.0, null));
 }

@@ -65,6 +65,13 @@ pub fn create(allocator: Allocator, io: Io, model_path: []const u8) CreateError!
     const hash = try hashFile(io, file);
     if (!std.mem.eql(u8, &hash, &model.ModelSha256)) return error.ModelMismatch;
 
+    // The library's default logger dumps every INFO/DEBUG line to stderr
+    // (several thousand per model load: tensor loads, Metal pipeline
+    // compiles). Replace it: the CLI's output is the interface; only
+    // WARN/ERROR/CONT pass through, and on stderr. The logger state is
+    // global in the pinned build, so re-setting it is harmless.
+    llama.llama_log_set(&llama.logCallback, null);
+
     // The pinned library guards this call internally (std::call_once); it
     // is safe to run on every engine creation.
     llama.llama_backend_init();
@@ -80,8 +87,11 @@ pub fn create(allocator: Allocator, io: Io, model_path: []const u8) CreateError!
     // The NUL is at cpath[len] (set above); the sentinel cast is where
     // that guarantee enters the C boundary.
     const cpath_c: [*:0]const u8 = @ptrCast(@constCast(cpath.ptr));
-    const m = llama.llama_model_load_from_file(cpath_c, llama.llama_model_default_params()) orelse
-        return error.ModelLoadFailed;
+    var mp = llama.llama_model_default_params();
+    // The library's built-in progress display (a line of dots per load)
+    // is replaced with a silent no-op; the CLI reports its own progress.
+    mp.progress_callback = &llama.progressContinue;
+    const m = llama.llama_model_load_from_file(cpath_c, mp) orelse return error.ModelLoadFailed;
     errdefer llama.llama_model_free(m);
 
     var cp = llama.llama_context_default_params();
