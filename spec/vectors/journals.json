@@ -53,7 +53,7 @@
         }
       ],
       "expect": {
-        "view": "# zephyr: seq 0..0 head=ea96b1bf2717b43e67217fd01fa433fad6cbd60548c37ac703ea2332c5adf341\n# 2026-01-01 Thu\n00:00 hello\n",
+        "view": "2026-01-01 Thu\n  0  00:00 hello\n",
         "segments": [
           {
             "name": "2026-01.zph",
@@ -355,7 +355,7 @@
         }
       ],
       "expect": {
-        "view": "# zephyr: seq 0..9 head=402b25abeccb2f2bf6415093deab4adeab787bad2eafc0c67fe15061b1316b31\n# 2026-01-16 Fri\n01:45 [travel][city] first day in the city\n11:30 (edited) [work][updated] second entry (amended)\n# 2026-01-18 Sun\n01:00 [redacted]\n",
+        "view": "2026-01-16 Fri\n  0  01:45 [travel][city] first day in the city\n  1  11:30 (edited) [work][updated] second entry (amended)\n\n2026-01-18 Sun\n  4  01:00 [redacted]\n",
         "segments": [
           {
             "name": "2026-01.zph",
