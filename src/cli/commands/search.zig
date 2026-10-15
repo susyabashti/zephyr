@@ -14,6 +14,7 @@ const Allocator = std.mem.Allocator;
 pub fn run(
     arena: Allocator,
     io: Io,
+    style: output.Style,
     err_file: File,
     out: File,
     environ_map: *const std.process.Environ.Map,
@@ -22,9 +23,9 @@ pub fn run(
 ) errors.RunError!void {
     const query = try args.joinParts(arena, rest);
     if (query.len == 0) return error.Usage;
-    const journal = try cli_journal.openReadJournal(arena, io, err_file, environ_map, path);
+    const journal = try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path);
     defer journal.close();
-    _ = try cli_journal.verifyOrReport(arena, io, err_file, &journal);
+    _ = try cli_journal.verifyOrReport(arena, io, style, err_file, &journal);
     const recs = try journal.collectRecords(arena);
     defer recs.deinit();
     const visible = try core.view.visibleEntries(arena, recs.headers, recs.payloads);

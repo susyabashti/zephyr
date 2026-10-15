@@ -54,6 +54,9 @@ pub fn run(init: std.process.Init, argv: []const []const u8) RunError!void {
 
     const out = File.stdout();
     const err_file = File.stderr();
+    // Style once, on the stream the user reads: color only on a TTY (and
+    // unless $NO_COLOR is set), so piped output stays byte-stable.
+    const style = output.Style.detect(out, io, init.environ_map);
 
     var journal_path: ?[]const u8 = null;
     var i: usize = 1;
@@ -85,51 +88,52 @@ pub fn run(init: std.process.Init, argv: []const []const u8) RunError!void {
     // it.
     if (!isCommand(command)) {
         const path = try cli_journal.resolveJournalPath(arena, io, init.environ_map, journal_path);
-        return log_cmd.run(arena, gpa, io, init.environ_map, path, argv[i..]);
+        return log_cmd.run(arena, gpa, io, style, init.environ_map, path, argv[i..]);
     }
 
     const rest = argv[i + 1 ..];
     const path = try cli_journal.resolveJournalPath(arena, io, init.environ_map, journal_path);
     if (std.mem.eql(u8, command, "log")) {
-        return log_cmd.run(arena, gpa, io, init.environ_map, path, rest);
+        return log_cmd.run(arena, gpa, io, style, init.environ_map, path, rest);
     } else if (std.mem.eql(u8, command, "verify")) {
-        return verify_cmd.run(arena, io, err_file, out, init.environ_map, path);
+        return verify_cmd.run(arena, io, style, err_file, out, init.environ_map, path);
     } else if (std.mem.eql(u8, command, "today") or std.mem.eql(u8, command, "yesterday") or std.mem.eql(u8, command, "week")) {
-        return views_cmd.runDayView(arena, io, err_file, out, init.environ_map, path, command);
+        return views_cmd.runDayView(arena, io, style, err_file, out, init.environ_map, path, command);
     } else if (std.mem.eql(u8, command, "on")) {
         if (rest.len != 1) return error.Usage;
         const day = args.parseCivilDate(rest[0]) orelse return error.Usage;
-        return views_cmd.runRangeView(arena, io, err_file, out, init.environ_map, path, .{ .start = day, .end = day + 1 });
+        return views_cmd.runRangeView(arena, io, style, err_file, out, init.environ_map, path, .{ .start = day, .end = day + 1 });
     } else if (std.mem.eql(u8, command, "export")) {
-        return export_cmd.run(arena, io, err_file, out, init.environ_map, path, rest);
+        return export_cmd.run(arena, io, style, err_file, out, init.environ_map, path, rest);
     } else if (std.mem.eql(u8, command, "search")) {
-        return search_cmd.run(arena, io, err_file, out, init.environ_map, path, rest);
+        return search_cmd.run(arena, io, style, err_file, out, init.environ_map, path, rest);
     } else if (std.mem.eql(u8, command, "ask")) {
-        return ask_cmd.run(arena, io, err_file, out, init.environ_map, path, rest);
+        return ask_cmd.run(arena, io, style, err_file, out, init.environ_map, path, rest);
     } else if (std.mem.eql(u8, command, "recap")) {
-        return recap_cmd.run(arena, io, err_file, out, init.environ_map, path, rest);
+        return recap_cmd.run(arena, io, style, err_file, out, init.environ_map, path, rest);
     } else if (std.mem.eql(u8, command, "profile")) {
-        return profile_cmd.run(arena, io, err_file, out, init.environ_map, path);
+        return profile_cmd.run(arena, io, style, err_file, out, init.environ_map, path);
     } else if (std.mem.eql(u8, command, "derived")) {
-        return derived_cmd.run(arena, gpa, io, err_file, out, init.environ_map, path, rest);
+        return derived_cmd.run(arena, gpa, io, style, err_file, out, init.environ_map, path, rest);
     } else if (std.mem.eql(u8, command, "model")) {
-        return model_cmd.run(arena, gpa, io, err_file, out, init.environ_map, rest);
+        return model_cmd.run(arena, gpa, io, style, err_file, out, init.environ_map, rest);
     } else if (std.mem.eql(u8, command, "rank")) {
-        return rank_cmd.run(arena, gpa, io, err_file, out, init.environ_map, path, rest);
+        return rank_cmd.run(arena, gpa, io, style, err_file, out, init.environ_map, path, rest);
     } else if (std.mem.eql(u8, command, "edit")) {
-        return edit_cmd.run(arena, io, err_file, out, init.environ_map, path, rest);
+        return edit_cmd.run(arena, io, style, err_file, out, init.environ_map, path, rest);
     } else if (std.mem.eql(u8, command, "rm")) {
-        return rm_cmd.run(arena, io, err_file, out, init.environ_map, path, rest);
+        return rm_cmd.run(arena, io, style, err_file, out, init.environ_map, path, rest);
     } else if (std.mem.eql(u8, command, "redact")) {
-        return redact_cmd.run(arena, io, err_file, out, init.environ_map, path, rest);
+        return redact_cmd.run(arena, io, style, err_file, out, init.environ_map, path, rest);
     } else if (std.mem.eql(u8, command, "checkpoint")) {
-        return checkpoint_cmd.run(arena, io, err_file, out, init.environ_map, path, rest);
+        return checkpoint_cmd.run(arena, io, style, err_file, out, init.environ_map, path, rest);
     } else if (std.mem.eql(u8, command, "ots-stamp")) {
-        return ots_stamp_cmd.run(arena, io, err_file, out, init.environ_map, path, rest);
+        return ots_stamp_cmd.run(arena, io, style, err_file, out, init.environ_map, path, rest);
     } else if (std.mem.eql(u8, command, "ots-export")) {
-        return ots_export_cmd.run(arena, io, err_file, out, init.environ_map, path, rest);
+        return ots_export_cmd.run(arena, io, style, err_file, out, init.environ_map, path, rest);
     } else if (std.mem.eql(u8, command, "mcp")) {
-        return mcp_cmd.run(arena, io, err_file, init.environ_map, path, rest);
+        // A machine protocol: no styling, ever.
+        return mcp_cmd.run(arena, io, output.Style.off, err_file, init.environ_map, path, rest);
     } else {
         unreachable; // isCommand is the set of known commands
     }

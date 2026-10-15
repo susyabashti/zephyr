@@ -103,8 +103,9 @@ pub fn preCheck(io: Io, path: []const u8) (File.OpenError || File.StatError)!Pre
 
 /// Downloads the pinned model and installs it at `out_path` (absolute).
 /// Streams to `<out_path>.tmp`, verifies against the pin, renames into
-/// place. Progress lines go to `out_file`. Honors the standard proxy
-/// environment variables (https_proxy and friends).
+/// place. The start and completion lines go to `out_file` (plain text:
+/// the fetcher is engine-side and stays free of CLI styling). Honors the
+/// standard proxy environment variables (https_proxy and friends).
 pub fn downloadAndInstall(
     gpa: Allocator,
     io: Io,
@@ -113,7 +114,7 @@ pub fn downloadAndInstall(
     out_path: []const u8,
 ) FetchError!void {
     const head = try gpa.print(
-        "model: downloading {s} ({d} MiB) from huggingface.co",
+        "downloading {s} ({d} MiB) from huggingface.co",
         .{ model.ModelFile, @divFloor(model.ModelBytes, 1 << 20) },
     );
     defer gpa.free(head);
@@ -151,7 +152,7 @@ pub fn downloadAndInstall(
     try File.Writer.flush(&w);
     try installVerified(io, tmp, out_path);
     gpa.free(tmp); // the errdefer covers only the failure path
-    const done = try gpa.print("model: ok (sha256 verified) at {s}", .{out_path});
+    const done = try gpa.print("✓ model ok (sha256 verified) · {s}", .{out_path});
     defer gpa.free(done);
     try writeLine(out_file, io, done);
 }

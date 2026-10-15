@@ -18,6 +18,7 @@ pub fn run(
     arena: Allocator,
     gpa: Allocator,
     io: Io,
+    style: output.Style,
     err_file: File,
     out: File,
     environ_map: *const std.process.Environ.Map,
@@ -25,14 +26,14 @@ pub fn run(
     rest: []const []const u8,
 ) errors.RunError!void {
     if (rest.len == 0 or rest.len > 2) return error.Usage;
-    const journal = try cli_journal.openReadJournal(arena, io, err_file, environ_map, path);
+    const journal = try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path);
     defer journal.close();
-    const result = try cli_journal.verifyOrReport(arena, io, err_file, &journal);
+    const result = try cli_journal.verifyOrReport(arena, io, style, err_file, &journal);
     if (rest.len == 1 and std.mem.eql(u8, rest[0], "status")) {
         var report = try core.dstore.artifactStatus(arena, &journal, result);
         defer report.deinit();
         for (report.items) |a| {
-            try output.printLine(out, io, try output.renderStatusLine(arena, a));
+            try output.printLine(out, io, try output.renderStatusLine(style, arena, a));
         }
     } else if (std.mem.eql(u8, rest[0], "rebuild")) {
         // `rebuild --embeddings` also builds the vector artifact (it loads
@@ -46,21 +47,27 @@ pub fn run(
         defer visible.deinit();
         const counts = try core.dstore.rebuild(arena, &journal, &visible, result);
         try output.printLine(out, io, try arena.print(
-            "rebuilt: {d} words, {d} entities (digests regenerate on demand)",
-            .{ counts.word_count, counts.entity_count },
+            "{s}rebuilt · {d} {s} · {d} {s}",
+            .{
+                try style.okMark(arena),
+                counts.word_count,
+                output.countNoun(counts.word_count, "word", "words"),
+                counts.entity_count,
+                output.countNoun(counts.entity_count, "entity", "entities"),
+            },
         ));
         if (with_embeddings) {
-            const model_path = try embed_helpers.resolveModelPathOrReport(arena, io, err_file, environ_map);
+            const model_path = try embed_helpers.resolveModelPathOrReport(arena, io, style, err_file, environ_map);
             try embed_helpers.fetchDefaultModelIfNeeded(gpa, io, err_file, out, environ_map, model_path);
             const engine = embed_mod.create(arena, io, model_path) catch |err| {
-                try embed_helpers.reportEmbedError(arena, io, err_file, model_path, err);
+                try embed_helpers.reportEmbedError(arena, io, style, err_file, model_path, err);
                 return err;
             };
             defer engine.deinit();
             const ec = try core.dstore.rebuildEmbeddings(arena, &journal, &visible, result, engine);
             try output.printLine(out, io, try arena.print(
-                "embeddings: {d} entries, {d} bytes/entry (derived/embed.zde)",
-                .{ ec.chunk_count, ec.bytes_per_entry },
+                "{s}embedded · {d} {s}",
+                .{ try style.okMark(arena), ec.chunk_count, output.countNoun(ec.chunk_count, "entry", "entries") },
             ));
         }
     } else {

@@ -1,5 +1,8 @@
 const std = @import("std");
 const cli = @import("cli/cli.zig");
+const output = @import("cli/output.zig");
+
+const File = std.Io.File;
 
 pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
@@ -17,7 +20,8 @@ pub fn main(init: std.process.Init) !void {
         // bytes did not match the pin).
         error.BadResponse, error.HashMismatch, error.ParentDirNotFound => std.process.exit(1),
         else => {
-            std.debug.print("zephyr: {s}\n", .{@errorName(err)});
+            const style = output.Style.detect(File.stderr(), init.io, init.environ_map);
+            std.debug.print("{s}zephyr: {s}\n", .{ try style.errMark(arena), @errorName(err) });
             std.process.exit(1);
         },
     };

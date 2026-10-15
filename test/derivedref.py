@@ -608,11 +608,12 @@ def run_gate(binary):
         # ---- status ----------------------------------------------------
         got = run_cli(journal_dir, "derived", "status").decode()
         lines = [l for l in got.splitlines() if l]
-        expect(any(l.startswith("derived/index.zdi") and l.endswith("fresh")
-                   for l in lines), f"derived status: index fresh: {got!r}")
-        expect(any(l.startswith("profile.md") and l.endswith("fresh")
-                   for l in lines), f"derived status: profile fresh: {got!r}")
-        expect(any(l.startswith("derived/digests/") and l.endswith("fresh")
+        # Status lines: `<name>  <state>[ · N records][ · dim D]`.
+        expect(any(l.startswith("index  fresh") for l in lines),
+               f"derived status: index fresh: {got!r}")
+        expect(any(l.startswith("profile  fresh") for l in lines),
+               f"derived status: profile fresh: {got!r}")
+        expect(any(l.startswith("digest ") and l.endswith("fresh")
                    for l in lines), f"derived status: digest fresh: {got!r}")
 
         # ---- staleness: a real append, state re-derived from disk ------

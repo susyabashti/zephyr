@@ -15,15 +15,16 @@ const Allocator = std.mem.Allocator;
 pub fn runDayView(
     arena: Allocator,
     io: Io,
+    style: output.Style,
     err_file: File,
     out: File,
     environ_map: *const std.process.Environ.Map,
     path: []const u8,
     which: []const u8,
 ) errors.RunError!void {
-    const journal = try cli_journal.openReadJournal(arena, io, err_file, environ_map, path);
+    const journal = try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path);
     defer journal.close();
-    _ = try cli_journal.verifyOrReport(arena, io, err_file, &journal);
+    _ = try cli_journal.verifyOrReport(arena, io, style, err_file, &journal);
     // "Today" is the current civil day in the local timezone.
     const now_ms = cli_journal.nowMs(io);
     const offset = try journal.tzOffsetMinutesAtMs(now_ms);
@@ -43,15 +44,16 @@ pub fn runDayView(
 pub fn runRangeView(
     arena: Allocator,
     io: Io,
+    style: output.Style,
     err_file: File,
     out: File,
     environ_map: *const std.process.Environ.Map,
     path: []const u8,
     range: core.view.DayRange,
 ) errors.RunError!void {
-    const journal = try cli_journal.openReadJournal(arena, io, err_file, environ_map, path);
+    const journal = try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path);
     defer journal.close();
-    _ = try cli_journal.verifyOrReport(arena, io, err_file, &journal);
+    _ = try cli_journal.verifyOrReport(arena, io, style, err_file, &journal);
     try renderJournalRange(arena, &journal, out, io, range);
 }
 

@@ -291,17 +291,15 @@ def run_check(binary):
                 return line
         return None
 
-    hex12 = lambda d: d[:6].hex()
+    noun = "record" if record_count == 1 else "records"
 
-    # ---- fresh: the Python-encoded artifact is accepted, fields echoed
+    # ---- fresh: the Python-encoded artifact is accepted
     artifact = encode_zde1(head, CHECK_MODEL_HASH, CHECK_ENGINE_ID,
                            record_count, seqs, vectors, CHECK_DIM)
     plant(artifact)
-    want = ("derived/index.zdi  head=-  missing\n"
-            f"embed  head={hex12(head)}  dim={CHECK_DIM}  "
-            f"model={hex12(CHECK_MODEL_HASH)}  engine={hex12(CHECK_ENGINE_ID)}  "
-            f"records={record_count}  fresh\n"
-            "profile.md  head=-  missing\n")
+    want = ("index  missing\n"
+            f"embed  fresh · {record_count} {noun} · dim {CHECK_DIM}\n"
+            "profile  missing\n")
     expect_bytes(must_cli(journal_dir, "derived", "status"),
                  want.encode(), "status: fresh")
 
@@ -309,11 +307,9 @@ def run_check(binary):
     stale = bytearray(artifact)
     stale[80] ^= 0xFF  # the head field
     plant(bytes(stale))
-    want = ("derived/index.zdi  head=-  missing\n"
-            f"embed  head={hex12(bytes([head[0] ^ 0xFF]) + head[1:6])}  "
-            f"dim={CHECK_DIM}  model={hex12(CHECK_MODEL_HASH)}  "
-            f"engine={hex12(CHECK_ENGINE_ID)}  records={record_count}  stale\n"
-            "profile.md  head=-  missing\n")
+    want = ("index  missing\n"
+            f"embed  stale · {record_count} {noun} · dim {CHECK_DIM}\n"
+            "profile  missing\n")
     expect_bytes(must_cli(journal_dir, "derived", "status"),
                  want.encode(), "status: stale")
     code, out, err = run_cli(journal_dir, "rank", "--mode", "vector",
@@ -327,12 +323,12 @@ def run_check(binary):
     corrupt[-1] ^= 0xFF
     plant(bytes(corrupt))
     line = status_line(must_cli(journal_dir, "derived", "status"))
-    expect(line == "embed  head=-  corrupt", f"status corrupt line: {line!r}")
+    expect(line == "embed  corrupt", f"status corrupt line: {line!r}")
 
     # ---- missing: no artifact
     os.remove(embed_path)
     line = status_line(must_cli(journal_dir, "derived", "status"))
-    expect(line == "embed  head=-  missing", f"status missing line: {line!r}")
+    expect(line == "embed  missing", f"status missing line: {line!r}")
     code, out, err = run_cli(journal_dir, "rank", "--mode", "vector",
                              "--top", "5", "the", "dog")
     expect(code != 0, "rank vector without an artifact must fail")
@@ -439,34 +435,33 @@ def run_eval(binary):
         print(f"SETUP: derived rebuild --embeddings failed: {e}")
         return 2
     lines = out.decode().splitlines()
-    m = re.search(r"^embeddings: (\d+) entries, (\d+) bytes/entry "
-                  r"\(derived/embed\.zde\)$", lines[-1] if lines else "")
-    if len(lines) < 2 or not lines[0].startswith("rebuilt:") or not m:
+    m = re.search(r"^✓ embedded · (\d+) entries?$", lines[-1] if lines else "")
+    if len(lines) < 2 or not lines[0].startswith("✓ rebuilt") or not m:
         print(f"SETUP: unexpected rebuild output: {out.decode()!r}")
         return 2
     if int(m.group(1)) != EMBEDDABLE_COUNT:
         print(f"SETUP: rebuilt {m.group(1)} entries, want {EMBEDDABLE_COUNT} "
               f"(redacted/private must be excluded)")
         return 2
-    print(f"rebuild: {m.group(1)} entries, {m.group(2)} bytes/entry")
+    print(f"rebuild: {m.group(1)} entries")
 
-    # ---- the artifact: fresh, right dim, pinned model hash
+    # ---- the artifact: fresh, right dim, right record count.
+    # The fresh verdict implies the artifact head matches the current
+    # journal head (the status no longer echoes the head), and the
+    # model/engine binding is enforced by the vector rank below, which
+    # refuses an artifact built under a different model or engine.
     status = must_cli(journal_dir, "derived", "status").decode()
-    m = re.search(r"^embed  head=([0-9a-f]{12})  dim=(\d+)  "
-                  r"model=([0-9a-f]{12})  engine=([0-9a-f]{12})  "
-                  r"records=(\d+)  (\w+)$", status, re.MULTILINE)
+    m = re.search(r"^embed  (\w+) · (\d+) records? · dim (\d+)$",
+                  status, re.MULTILINE)
     if not m:
         print(f"SETUP: no parseable embed status line: {status!r}")
         return 2
-    if (m.group(6) != "fresh" or int(m.group(2)) != EXPECTED_DIM
-            or int(m.group(5)) != RECORD_COUNT or m.group(1) != head[:6].hex()
-            or m.group(3) != MODEL_SHA256[:12]):
+    if (m.group(1) != "fresh" or int(m.group(3)) != EXPECTED_DIM
+            or int(m.group(2)) != RECORD_COUNT):
         print(f"SETUP: embed artifact not as pinned: {m.group(0)!r} "
-              f"(dim {EXPECTED_DIM}, records {RECORD_COUNT}, "
-              f"model {MODEL_SHA256[:12]}, head {head[:6].hex()})")
+              f"(dim {EXPECTED_DIM}, records {RECORD_COUNT})")
         return 2
-    print(f"artifact: fresh, dim={m.group(2)}, model={m.group(3)}, "
-          f"engine={m.group(4)}, records={m.group(5)}")
+    print(f"artifact: fresh, dim={m.group(3)}, records={m.group(2)}")
 
     # ---- rank every labeled query in every mode
     results = {}

@@ -19,7 +19,7 @@ const ReadProofError = Allocator.Error || Dir.OpenError || Dir.ReadFileAllocErro
 /// Reads the proof file at `path` (relative paths resolve against the
 /// current directory). A missing file prints a message and becomes
 /// TargetNotFound.
-fn readProofFile(allocator: Allocator, io: Io, err_file: File, path: []const u8) ReadProofError![]u8 {
+fn readProofFile(allocator: Allocator, io: Io, style: output.Style, err_file: File, path: []const u8) ReadProofError![]u8 {
     const abs = if (std.Io.Dir.path.isAbsolute(path))
         path
     else blk: {
@@ -33,7 +33,7 @@ fn readProofFile(allocator: Allocator, io: Io, err_file: File, path: []const u8)
     defer Dir.close(d, io);
     return Dir.readFileAlloc(d, io, std.fs.path.basename(abs), allocator, .unlimited) catch |err| switch (err) {
         error.FileNotFound => {
-            output.printLine(err_file, io, try allocator.print("no such file: {s}", .{path})) catch return error.InputOutput;
+            output.printLine(err_file, io, try allocator.print("{s}no such file: {s}", .{ try style.errMark(allocator), path })) catch return error.InputOutput;
             return error.TargetNotFound;
         },
         else => return err,
@@ -43,6 +43,7 @@ fn readProofFile(allocator: Allocator, io: Io, err_file: File, path: []const u8)
 pub fn run(
     arena: Allocator,
     io: Io,
+    style: output.Style,
     err_file: File,
     out: File,
     environ_map: *const std.process.Environ.Map,
@@ -68,31 +69,39 @@ pub fn run(
     const seg_name = segment_name orelse return error.Usage;
     const proof_file = proof_path orelse return error.Usage;
     if (!core.journal.isSegmentName(seg_name)) {
-        try output.printLine(err_file, io, try arena.print("no such segment: {s}", .{seg_name}));
+        try output.printLine(err_file, io, try arena.print("{s}no such segment: {s}", .{ try style.errMark(arena), seg_name }));
         return error.TargetNotFound;
     }
 
-    const journal = try cli_journal.openReadJournal(arena, io, err_file, environ_map, path);
+    const journal = try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path);
     defer journal.close();
-    _ = try cli_journal.verifyOrReport(arena, io, err_file, &journal);
+    _ = try cli_journal.verifyOrReport(arena, io, style, err_file, &journal);
 
-    const head = try cli_journal.sealedSegmentHead(arena, io, err_file, &journal, seg_name);
+    const head = try cli_journal.sealedSegmentHead(arena, io, style, err_file, &journal, seg_name);
     var expected: [32]u8 = undefined;
     core.records.Sha256.hash(&head, &expected, .{});
 
-    const proof = try readProofFile(arena, io, err_file, proof_file);
+    const proof = try readProofFile(arena, io, style, err_file, proof_file);
     const verification = core.ots.verify(arena, proof, &expected) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => |e| {
-            try output.printLine(err_file, io, try arena.print("ots-stamp: proof verification failed: {s}", .{output.otsFailureReason(e)}));
+            try output.printLine(err_file, io, try arena.print(
+                "{s}proof verification failed: {s}",
+                .{ try style.errMark(arena), output.otsFailureReason(e) },
+            ));
             return error.BadOtsProof;
         },
     };
 
     const month = seg_name[0..7];
     try journal.writeOtsAnchorFile(arena, month, proof);
+    const anchor_path = try arena.print("anchors/ots-{s}.ots", .{month});
     try output.printLine(out, io, try arena.print(
-        "ots-stamp: ok (anchors/ots-{s}.ots, {s})",
-        .{ month, try output.attestationSummary(arena, verification.attestations) },
+        "{s}ots · {s} · {s}",
+        .{
+            try style.okMark(arena),
+            try style.dim(arena, anchor_path),
+            try output.attestationSummary(arena, verification.attestations),
+        },
     ));
 }

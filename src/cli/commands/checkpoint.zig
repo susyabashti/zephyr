@@ -17,6 +17,7 @@ const Allocator = std.mem.Allocator;
 pub fn run(
     arena: Allocator,
     io: Io,
+    style: output.Style,
     err_file: File,
     out: File,
     environ_map: *const std.process.Environ.Map,
@@ -34,9 +35,9 @@ pub fn run(
             return error.Usage;
         }
     }
-    const journal = try cli_journal.openReadJournal(arena, io, err_file, environ_map, path);
+    const journal = try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path);
     defer journal.close();
-    _ = try cli_journal.verifyOrReport(arena, io, err_file, &journal);
+    _ = try cli_journal.verifyOrReport(arena, io, style, err_file, &journal);
 
     // Key resolution: --key PATH > $ZEPHYR_KEY > <journal>/zephyr-key.
     const resolved_key = key_path orelse environ_map.get("ZEPHYR_KEY") orelse
@@ -52,14 +53,15 @@ pub fn run(
     // resulting (head, count) to the key.
     const result = try journal.verify(arena);
     if (!result.ok) {
-        try output.reportIssue(err_file, io, arena, result.issue.?);
+        try output.reportIssue(err_file, io, style, arena, result.issue.?);
         return error.VerifyFailed;
     }
     const bytes = try core.anchor.render(&kp, result.head, result.record_count, now_ms, seq);
     try journal.writeAnchorFile(arena, seq, &bytes);
+    const anchor_path = try arena.print("anchors/checkpoint-{d}.zpa", .{seq});
     try output.printLine(out, io, try arena.print(
-        "checkpoint seq {d} (key {s}, anchor anchors/checkpoint-{d}.zpa)",
-        .{ seq, resolved_key, seq },
+        "{s}checkpoint seq {d} → {s}",
+        .{ try style.okMark(arena), seq, try style.dim(arena, anchor_path) },
     ));
 }
 

@@ -1,6 +1,6 @@
 //! zephyr log [-t TAG]... "text" — and the bare-word quick log
 //! (`zephyr <text>`; cli.zig dispatches it here, so the word itself is the
-//! first part of the text). Prints `logged seq N`.
+//! first part of the text). Prints `✓ logged seq N` (styled on a TTY).
 
 const std = @import("std");
 const core = @import("zephyr_core");
@@ -17,6 +17,7 @@ pub fn run(
     arena: Allocator,
     gpa: Allocator,
     io: Io,
+    style: output.Style,
     environ_map: *const std.process.Environ.Map,
     path: []const u8,
     rest: []const []const u8,
@@ -34,7 +35,7 @@ pub fn run(
     // Verify before trust: never extend a failing journal.
     const pre = try journal.verify(arena);
     if (!pre.ok) {
-        try output.reportIssue(File.stderr(), io, arena, pre.issue.?);
+        try output.reportIssue(File.stderr(), io, style, arena, pre.issue.?);
         return error.VerifyFailed;
     }
     const tz_offset_min = try journal.tzOffsetMinutesAtMs(now_ms);
@@ -48,5 +49,6 @@ pub fn run(
         tz_offset_min,
         false,
     );
-    try output.printLine(File.stdout(), io, try arena.print("logged seq {d}", .{seq}));
+    const seq_s = try style.accent(arena, try arena.print("{d}", .{seq}));
+    try output.printLine(File.stdout(), io, try arena.print("{s}logged seq {s}", .{ try style.okMark(arena), seq_s }));
 }

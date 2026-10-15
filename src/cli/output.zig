@@ -10,6 +10,77 @@ const Io = std.Io;
 const File = Io.File;
 const Allocator = std.mem.Allocator;
 
+/// Terminal styling for human-facing lines: the same line, with SGR color
+/// codes only when the stream is a TTY and $NO_COLOR is not set
+/// (no-color.org). Piped output stays byte-stable, so scripts and the
+/// byte-exact gates are unaffected.
+pub const Style = struct {
+    enabled: bool,
+
+    /// Styling off: plain text only.
+    pub const off: @This() = .{ .enabled = false };
+
+    /// Detect once at startup, on the stream the user reads: color only on
+    /// a TTY, and only when $NO_COLOR is unset or empty.
+    pub fn detect(file: File, io: Io, environ_map: *const std.process.Environ.Map) Style {
+        const is_tty = File.isTty(file, io) catch false;
+        if (!is_tty) return .off;
+        const no_color = environ_map.get("NO_COLOR") orelse return .{ .enabled = true };
+        if (no_color.len == 0) return .{ .enabled = true };
+        return .off;
+    }
+
+    /// Wrap `text` in an SGR code and a reset. When styling is off the
+    /// text is returned as-is (literals and arena slices both work).
+    pub fn wrap(
+        self: Style,
+        allocator: Allocator,
+        comptime code: []const u8,
+        text: []const u8,
+    ) Allocator.Error![]const u8 {
+        if (!self.enabled) return text;
+        return allocator.print("\x1b[{s}m{s}\x1b[0m", .{ code, text });
+    }
+
+    /// The `✓ ` prefix of a success line (green).
+    pub fn okMark(self: Style, allocator: Allocator) Allocator.Error![]const u8 {
+        return self.wrap(allocator, "32", "✓ ");
+    }
+
+    /// The `✗ ` prefix of a failure line (red).
+    pub fn errMark(self: Style, allocator: Allocator) Allocator.Error![]const u8 {
+        return self.wrap(allocator, "31", "✗ ");
+    }
+
+    /// Secondary detail — paths, hashes, hints (dim).
+    pub fn dim(self: Style, allocator: Allocator, text: []const u8) Allocator.Error![]const u8 {
+        return self.wrap(allocator, "2", text);
+    }
+
+    /// The primary number of a line, a seq (cyan).
+    pub fn accent(self: Style, allocator: Allocator, text: []const u8) Allocator.Error![]const u8 {
+        return self.wrap(allocator, "36", text);
+    }
+
+    /// Verdicts: fresh (green), stale (yellow), corrupt (red).
+    pub fn good(self: Style, allocator: Allocator, text: []const u8) Allocator.Error![]const u8 {
+        return self.wrap(allocator, "32", text);
+    }
+
+    pub fn warn(self: Style, allocator: Allocator, text: []const u8) Allocator.Error![]const u8 {
+        return self.wrap(allocator, "33", text);
+    }
+
+    pub fn bad(self: Style, allocator: Allocator, text: []const u8) Allocator.Error![]const u8 {
+        return self.wrap(allocator, "31", text);
+    }
+};
+
+/// The singular or plural form of a count noun ("record" / "records").
+pub fn countNoun(count: u64, comptime singular: []const u8, comptime plural: []const u8) []const u8 {
+    return if (count == 1) singular else plural;
+}
+
 pub fn printLine(file: File, io: Io, text: []const u8) File.Writer.Error!void {
     try File.writeStreamingAll(file, io, text);
     try File.writeStreamingAll(file, io, "\n");
@@ -109,15 +180,30 @@ pub fn hex12Of(allocator: Allocator, hash: []const u8) Allocator.Error![]const u
     return out;
 }
 
-pub fn reportIssue(file: File, io: Io, allocator: Allocator, issue: core.journal.VerifyIssue) errors.RunError!void {
-    const line = try allocator.print("FAIL: {s} seq {d} {s}: {s}", .{ issue.file, issue.seq, issue.field, issue.detail });
+pub fn reportIssue(
+    file: File,
+    io: Io,
+    style: Style,
+    allocator: Allocator,
+    issue: core.journal.VerifyIssue,
+) errors.RunError!void {
+    const mark = try style.errMark(allocator);
+    const line = try allocator.print("{s}{s} seq {d} {s}: {s}", .{ mark, issue.file, issue.seq, issue.field, issue.detail });
     try printLine(file, io, line);
 }
 
-pub fn reportTargetError(arena: Allocator, io: Io, file: File, target: u64, err: core.journal.Journal.ResolveTargetError) errors.RunError!void {
+pub fn reportTargetError(
+    arena: Allocator,
+    io: Io,
+    style: Style,
+    file: File,
+    target: u64,
+    err: core.journal.Journal.ResolveTargetError,
+) errors.RunError!void {
+    const mark = try style.errMark(arena);
     const msg = switch (err) {
-        error.TargetNotFound => try arena.print("no such entry: seq {d}", .{target}),
-        error.TargetNotEntry => try arena.print("seq {d} is not an entry", .{target}),
+        error.TargetNotFound => try arena.print("{s}no such entry: seq {d}", .{ mark, target }),
+        error.TargetNotEntry => try arena.print("{s}seq {d} is not an entry", .{ mark, target }),
     };
     try printLine(file, io, msg);
 }
@@ -184,32 +270,41 @@ pub fn attestationSummary(allocator: Allocator, hits: []const core.ots.Attestati
     return try std.mem.join(allocator, ", ", parts.items);
 }
 
-pub fn renderStatusLine(arena: Allocator, a: core.dstore.Artifact) Allocator.Error![]const u8 {
-    // The embedding artifact carries its own digests (spec/semantic.md
-    // section 7): hex12 head, model, and engine plus the dimension.
-    const line = if (a.dim != null) blk: {
-        const head = if (a.head) |h| try hex12Of(arena, &h) else "-";
-        const model = if (a.model_hash) |m| try hex12Of(arena, &m) else "-";
-        const engine = if (a.engine_id) |e| try hex12Of(arena, &e) else "-";
-        const records = if (a.record_count) |r| r else 0;
-        break :blk try arena.print(
-            "{s}  head={s}  dim={d}  model={s}  engine={s}  records={d}",
-            .{ a.name, head, a.dim.?, model, engine, records },
-        );
-    } else blk: {
-        const head = if (a.head) |h| try hexOf(arena, &h) else "-";
-        var l = try arena.print("{s}  head={s}", .{ a.name, head });
-        if (a.version) |v| {
-            const extra = try arena.print("  v{d}  {d} records", .{ v, a.record_count.? });
-            l = try arena.print("{s}{s}", .{ l, extra });
-        }
-        break :blk l;
-    };
+/// One status line: the artifact's short name, its colored state, and —
+/// when known — the record count and, for the embedding artifact, the
+/// vector dimension.
+pub fn renderStatusLine(style: Style, arena: Allocator, a: core.dstore.Artifact) Allocator.Error![]const u8 {
+    const name = try prettyArtifactName(arena, a.name);
     const state = switch (a.state) {
-        .fresh => "fresh",
-        .stale => "stale",
-        .corrupt => "corrupt",
-        .missing => "missing",
+        .fresh => try style.good(arena, "fresh"),
+        .stale => try style.warn(arena, "stale"),
+        .corrupt => try style.bad(arena, "corrupt"),
+        .missing => try style.dim(arena, "missing"),
     };
-    return try arena.print("{s}  {s}", .{ line, state });
+    var line = try arena.print("{s}  {s}", .{ name, state });
+    if (a.record_count) |records| {
+        const detail = try arena.print(" · {d} {s}", .{ records, countNoun(records, "record", "records") });
+        line = try arena.print("{s}{s}", .{ line, try style.dim(arena, detail) });
+    }
+    if (a.dim) |dim| {
+        const detail = try arena.print(" · dim {d}", .{dim});
+        line = try arena.print("{s}{s}", .{ line, try style.dim(arena, detail) });
+    }
+    return line;
+}
+
+/// The short name of an artifact for the status lines: `index`, `embed`,
+/// `profile`, and `digest <start>..<end>`; anything else (a user-placed
+/// file in the digests directory) keeps its name.
+fn prettyArtifactName(allocator: Allocator, name: []const u8) Allocator.Error![]const u8 {
+    if (std.mem.eql(u8, name, "derived/index.zdi")) return "index";
+    if (std.mem.eql(u8, name, "embed")) return "embed";
+    if (std.mem.eql(u8, name, "profile.md")) return "profile";
+    const prefix = "derived/digests/";
+    if (std.mem.startsWith(u8, name, prefix) and std.mem.endsWith(u8, name, ".digest")) {
+        const period = name[prefix.len .. name.len - ".digest".len];
+        const sep = std.mem.lastIndexOfScalar(u8, period, '_') orelse return allocator.dupe(u8, name);
+        return allocator.print("digest {s}..{s}", .{ period[0..sep], period[sep + 1 ..] });
+    }
+    return allocator.dupe(u8, name);
 }

@@ -16,6 +16,7 @@ const Allocator = std.mem.Allocator;
 pub fn run(
     arena: Allocator,
     io: Io,
+    style: output.Style,
     err_file: File,
     environ_map: *const std.process.Environ.Map,
     path: []const u8,
@@ -33,7 +34,7 @@ pub fn run(
     const journal = if (allow_write)
         try core.journal.Journal.open(arena, io, environ_map, path, true)
     else
-        try cli_journal.openReadJournal(arena, io, err_file, environ_map, path);
+        try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path);
     defer journal.close();
     var server = mcp.server.Server.init(&journal, allow_write);
     return server.run(arena, io);
