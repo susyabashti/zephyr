@@ -41,6 +41,8 @@ A task is done only when the code is formatted, builds, and passes the project's
 
 ## Architecture and layering
 
+Codebase map: `docs/map.md` — module graph, one-line purpose per `src/` file, the byte-contract gate table, and a how-to-find index. Start there instead of searching; the `test/structure.py` gate fails CI if the map drifts from the source tree.
+
 Source layout (adapt names to what exists in the repo):
 
 ```
