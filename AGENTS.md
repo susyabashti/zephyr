@@ -108,3 +108,8 @@ Keep files small and focused. Split early and often; don't wait for a file to be
 - If a request is ambiguous or touches build config, dependencies, or public API, ask first.
 - Don't commit build output or caches.
 - In your final summary, state what changed, what you ran, and what you could not verify.
+
+## Math
+
+- Don't make calculations by yourself
+- Use the terminal to make verified and backed calculations.
