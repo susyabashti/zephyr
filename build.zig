@@ -91,6 +91,32 @@ pub fn build(b: *std.Build) void {
         });
         llama_build.step.dependOn(&llama_configure.step);
 
+        if (target.result.os.tag == .linux) {
+            // On Linux the engine must be compiled by the same toolchain that
+            // links it. The 0.17 build system always links the C++ stdlib as
+            // -lc++ (LLVM libc++; there is no API to select libstdc++), so
+            // archives built by the host g++ fail to link (the __cxx11 ABI
+            // symbols are undefined). Build them with this toolchain's own
+            // clang instead: `zig cc` / `zig c++` (CMAKE_<LANG>_COMPILER_ARG1
+            // is prepended to the compiler invocation, turning `zig` into the
+            // cc/c++ driver), and `zig c++` links the bundled libc++
+            // statically, so the shipped binary has no host C++ runtime
+            // dependency.
+            const zig_exe = std.Build.LazyPath.zig_exe;
+            llama_configure.addFileArg2(zig_exe, .{
+                .prefix = "-DCMAKE_C_COMPILER=",
+                .make_absolute = true,
+            });
+            llama_configure.addFileArg2(zig_exe, .{
+                .prefix = "-DCMAKE_CXX_COMPILER=",
+                .make_absolute = true,
+            });
+            llama_configure.addArgs(&.{
+                "-DCMAKE_C_COMPILER_ARG1=cc",
+                "-DCMAKE_CXX_COMPILER_ARG1=c++",
+            });
+        }
+
         // The engine module links the static library set. The order is the
         // pinned build's own CMake dependency graph (zig-out/llama/
         // llama-config.cmake and ggml/ggml-config.cmake): llama -> ggml ->
@@ -112,10 +138,12 @@ pub fn build(b: *std.Build) void {
         for (llama_libs) |name| {
             embed.linkSystemLibrary(name, .{ .use_pkg_config = .no, .preferred_link_mode = .static });
         }
-        // Runtime C++ stdlib: llama.cpp is C++, so the executable needs the
-        // ABI it was built against — libc++ on Apple, libstdc++ (GCC) on
-        // Linux. The linker names differ per platform.
-        embed.linkSystemLibrary(if (target.result.os.tag == .macos) "c++" else "stdc++", .{});
+        // C++ stdlib: the build system links it as -lc++ (LLVM libc++)
+        // wherever C++ objects are present. On macOS the host clang built the
+        // engine against libc++; on Linux the engine is built with `zig c++`
+        // (above), which links this same bundled libc++. The name only sets a
+        // flag — 0.17 emits -lc++ either way.
+        embed.linkSystemLibrary("c++", .{});
         if (target.result.os.tag == .macos) {
             embed.linkFramework("Accelerate", .{});
             embed.linkFramework("Metal", .{});
