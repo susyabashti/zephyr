@@ -112,9 +112,10 @@ pub fn build(b: *std.Build) void {
         for (llama_libs) |name| {
             embed.linkSystemLibrary(name, .{ .use_pkg_config = .no, .preferred_link_mode = .static });
         }
-        // Runtime dependencies: libstdc++ (llama.cpp is C++) and the
-        // frameworks the built backends need.
-        embed.linkSystemLibrary("c++", .{});
+        // Runtime C++ stdlib: llama.cpp is C++, so the executable needs the
+        // ABI it was built against — libc++ on Apple, libstdc++ (GCC) on
+        // Linux. The linker names differ per platform.
+        embed.linkSystemLibrary(if (target.result.os.tag == .macos) "c++" else "stdc++", .{});
         if (target.result.os.tag == .macos) {
             embed.linkFramework("Accelerate", .{});
             embed.linkFramework("Metal", .{});

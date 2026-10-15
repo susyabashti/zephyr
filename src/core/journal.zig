@@ -65,6 +65,8 @@ pub const Journal = struct {
     }
 
     /// Segment file names in chronological (lexicographic) order.
+    /// The returned slice and every name are allocated by `allocator`;
+    /// the caller frees each name and then the slice.
     pub fn listSegments(self: *const Journal, allocator: Allocator) (Allocator.Error || Dir.Iterator.Error)![]const []const u8 {
         var iter = Dir.iterate(self.dir);
         var names = std.ArrayList([]const u8).empty;
@@ -101,7 +103,10 @@ pub const Journal = struct {
         is_private: bool,
     ) AppendError!u64 {
         const names = try self.listSegments(allocator);
-        defer allocator.free(names);
+        defer {
+            for (names) |name| allocator.free(name);
+            allocator.free(names);
+        }
         const target_name = try segmentMonthName(allocator, timestamp_ms);
         defer allocator.free(target_name);
 
@@ -145,6 +150,7 @@ pub const Journal = struct {
         };
         try records.validate(&header, &payload);
         const payload_bytes = try allocator.alloc(u8, records.payloadSize(text, tags));
+        defer allocator.free(payload_bytes);
         records.encodePayload(&payload, payload_bytes);
         header.commitment = records.computeCommitment(payload_bytes);
         var prefix: [records.HeaderPrefixLen]u8 = undefined;
@@ -162,6 +168,7 @@ pub const Journal = struct {
             const old = try self.readFileBytes(allocator, target_name);
             defer allocator.free(old);
             const new_bytes = try extendSegmentBytes(allocator, old, &raw);
+            defer allocator.free(new_bytes);
             try segment.writeAtomic(self.dir, self.io, target_name, new_bytes);
         } else {
             // New segment: first seal the immediately preceding active one.
@@ -173,6 +180,7 @@ pub const Journal = struct {
                     const summary = try segment.summary(bytes);
                     if (!summary.sealed) {
                         const sealed_bytes = try sealSegmentBytes(allocator, bytes, &summary);
+                        defer allocator.free(sealed_bytes);
                         try segment.writeAtomic(self.dir, self.io, last, sealed_bytes);
                     }
                 }
@@ -186,6 +194,7 @@ pub const Journal = struct {
                 .payload_region_len = @intCast(4 + raw.payload.len),
             };
             const new_bytes = try segment.renderFile(allocator, &file_header, &.{raw});
+            defer allocator.free(new_bytes);
             try segment.writeAtomic(self.dir, self.io, target_name, new_bytes);
         }
         return next_seq;
@@ -214,7 +223,10 @@ pub const Journal = struct {
 
     pub fn collectRecords(self: *const Journal, allocator: Allocator) CollectRecordsError!RecordSet {
         const names = try self.listSegments(allocator);
-        defer allocator.free(names);
+        defer {
+            for (names) |name| allocator.free(name);
+            allocator.free(names);
+        }
         var headers = std.ArrayList(records.Header).empty;
         errdefer headers.deinit(allocator);
         var payloads = std.ArrayList([]const u8).empty;
@@ -266,7 +278,10 @@ pub const Journal = struct {
         tz_offset_min: i16,
     ) RedactError!u64 {
         const names = try self.listSegments(allocator);
-        defer allocator.free(names);
+        defer {
+            for (names) |name| allocator.free(name);
+            allocator.free(names);
+        }
 
         var found = false;
         for (names) |name| {
@@ -290,6 +305,7 @@ pub const Journal = struct {
             if (indexes.items.len == 0) continue;
             found = true;
             const new_bytes = try segment.redactPayloads(allocator, bytes, indexes.items);
+            defer allocator.free(new_bytes);
             try segment.writeAtomic(self.dir, self.io, name, new_bytes);
         }
         if (!found) return error.TargetNotFound;
@@ -317,7 +333,16 @@ pub const Journal = struct {
     pub fn verify(self: *const Journal, allocator: Allocator) VerifyError!VerifyResult {
         const names = try self.listSegments(allocator);
         var files = std.ArrayList(verifyFile).empty;
-        errdefer files.deinit(allocator);
+        defer {
+            // verifyBytes never frees its inputs, and the ArrayList deinit
+            // doesn't know about the name/bytes slices: release them all here.
+            for (files.items) |f| {
+                allocator.free(f.name);
+                allocator.free(f.bytes);
+            }
+            files.deinit(allocator);
+            allocator.free(names);
+        }
         for (names) |name| {
             const bytes = try self.readFileBytes(allocator, name);
             try files.append(allocator, .{ .name = name, .bytes = bytes });
