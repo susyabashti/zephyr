@@ -22,7 +22,7 @@ pub const RunError = Io.Reader.Error || Io.Writer.Error || Io.File.Writer.Error 
 
 /// ServerInfo version. Keep in sync with cli.Version (one binary, one
 /// version).
-pub const Version: []const u8 = "0.2.0";
+pub const Version: []const u8 = "0.2.1";
 
 /// The protocol versions this server speaks (spec/mcp.md section 2).
 pub const LatestProtocolVersion: []const u8 = "2025-06-18";

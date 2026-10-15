@@ -43,7 +43,7 @@ const views_cmd = @import("commands/views.zig");
 const Io = std.Io;
 const File = Io.File;
 
-pub const Version: []const u8 = "0.2.0";
+pub const Version: []const u8 = "0.2.1";
 
 pub const RunError = errors.RunError;
 
