@@ -96,7 +96,7 @@ jobs:
       # The key embeds the pinned sha256 (src/embed/model.zig): a changed
       # pin misses the cache, and `model fetch` re-verifies any cached file.
       - name: Embedding model (cached)
-        uses: actions/cache@v7
+        uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/.zephyr/models
           key: zephyr-embeddinggemma-300M-q8-0-a0f7b4e13c397a6e
