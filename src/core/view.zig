@@ -319,7 +319,7 @@ pub fn weekStart(day: i64) i64 {
 }
 
 /// Unix epoch day 0 (1970-01-01) was a Thursday.
-fn weekdayName(days: i64) []const u8 {
+pub fn weekdayName(days: i64) []const u8 {
     const names = [_][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
     const index: usize = @intCast(@rem(3 + days, 7));
     return names[index];

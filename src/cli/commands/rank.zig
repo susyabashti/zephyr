@@ -9,7 +9,7 @@
 //!
 //!   <seq>  YYYY-MM-DD HH:MM  [tag]... text   (score, 3 decimals)
 //!
-//! On a TTY the score is dimmed.
+//! On a TTY the seq is accented, the date bold, the time and score dimmed.
 //!
 //! `vector` and `hybrid` need the fresh embedding artifact and the model;
 //! without them they report where to build it and fail with
@@ -145,7 +145,7 @@ pub fn run(
 /// from the text by three spaces (spec/semantic.md section 7). Entries
 /// absent from the visible set (a stale artifact cannot happen here, but
 /// neither can a redaction after the build) are skipped, not padded. On a
-/// TTY the score is dimmed.
+/// TTY the seq is accented, the date bold, the time and score dimmed.
 fn renderHits(
     arena: Allocator,
     io: Io,
@@ -154,6 +154,8 @@ fn renderHits(
     by_seq: *const std.array_hash_map.Auto(u64, *const view.ViewEntry),
     hits: []const embed.RankHit,
 ) errors.RunError!void {
+    var seq_buf: [20]u8 = undefined; // u64 decimal
+    var date_buf: [16]u8 = undefined;
     var score_buf: [32]u8 = undefined;
     for (hits) |hit| {
         const e = by_seq.get(hit.seq) orelse continue;
@@ -165,11 +167,20 @@ fn renderHits(
             for (e.tags) |tag| try tags.appendSlice(arena, try arena.print("[{s}]", .{tag}));
             break :blk try arena.print("{s} {s}", .{ try tags.toOwnedSlice(arena), e.text });
         } else e.text;
+        const seq_str = std.fmt.bufPrint(&seq_buf, "{d}", .{hit.seq}) catch unreachable;
+        const date_str = std.fmt.bufPrint(&date_buf, "{d:0>4}-{d:0>2}-{d:0>2}", .{ date.year, date.month, date.day }) catch unreachable;
         const score = std.fmt.bufPrint(&score_buf, "({d:.3})", .{hit.score}) catch unreachable;
-        try output.printLine(out, io, try arena.print(
-            "{d}  {d:0>4}-{d:0>2}-{d:0>2} {s}  {s}   {s}",
-            .{ hit.seq, date.year, date.month, date.day, time, tail, try style.dim(arena, score) },
-        ));
+        // With styling off each wrap returns its text unchanged, so this
+        // assembles the frozen rank line byte for byte (spec/semantic.md
+        // section 7).
+        const line = try arena.print("{s}  {s} {s}  {s}   {s}", .{
+            try style.accent(arena, seq_str),
+            try style.bold(arena, date_str),
+            try style.dim(arena, &time),
+            tail,
+            try style.dim(arena, score),
+        });
+        try output.printLine(out, io, line);
     }
 }
 
