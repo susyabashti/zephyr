@@ -11,8 +11,8 @@ Two modes:
         artifact (dim, model, engine and record digests echoed back);
       - `rank --mode vector` refuses a stale or missing artifact with the
         actionable message (never serves, never rebuilds);
-      - `rank --mode keyword` bytes: the provenance line plus the Phase 7
-        token hits as a ranked list (re-implemented here);
+      - `rank --mode keyword` bytes: one line per Phase 7 token hit, the
+        seq first (re-implemented here);
       - `ask` with no artifact degrades silently to the exact Phase 7
         keyword pack (test/derivedref.py's render).
 
@@ -185,18 +185,16 @@ def check_vectors(n, dim):
 
 # ---------------------------------------------------------------- keyword + view
 
-def entry_line(v):
-    """The view line the renderer must emit for a visible entry
-    (view.entryLine): time, redaction/edit markers, tag block, text."""
+def rank_line(v, score):
+    """The rank line (spec/semantic.md section 7): seq, date, local time,
+    tag block, text, and the score in parentheses three spaces from the
+    text. No edit or redaction markers — rank hits are visible entries."""
+    d = reference.date_from_epoch_day(v["day"])
     secs = (v["ts_ms"] + v["tz"] * 60_000) // 1000
-    line = f"{(secs % 86_400) // 3600:02d}:{(secs % 3600) // 60:02d}"
-    if v["redacted"]:
-        return line + " [redacted]"
-    if v.get("edited"):
-        line += " (edited)"
-    if v["tags"]:
-        line += " " + "".join(f"[{t}]" for t in v["tags"])
-    return line + " " + v["text"]
+    time = f"{(secs % 86_400) // 3600:02d}:{(secs % 3600) // 60:02d}"
+    tail = ("".join(f"[{t}]" for t in v["tags"]) + " " + v["text"]
+            if v["tags"] else v["text"])
+    return f"{v['seq']}  {d:%Y-%m-%d} {time}  {tail}   ({float(score):.3f})"
 
 
 def keyword_hits(ves, question):
@@ -335,15 +333,12 @@ def run_check(binary):
     expect(EMBED_NO_ARTIFACT_MSG in err,
            f"rank vector without an artifact: stderr {err[:200]!r}")
 
-    # ---- rank keyword: exact bytes (provenance + ranked token hits)
+    # ---- rank keyword: exact bytes (one line per hit, seq first)
     question = "anything about auth or Alice?"
     hits = keyword_hits(ves, question)
     expect(hits == [(0, 1), (1, 1), (13, 1)],
            f"python keyword hits {hits}, want [(0, 1), (1, 1), (13, 1)]")
-    lines = [f"# zephyr: seq 0..{record_count - 1} head={head.hex()}"]
-    for rank, (seq, score) in enumerate(hits[:10], 1):
-        lines.append(f"{rank}\t{seq}\t{float(score):.6f}\t"
-                     f"{entry_line(by_seq[seq])}")
+    lines = [rank_line(by_seq[seq], score) for seq, score in hits[:10]]
     want = "".join(line + "\n" for line in lines)
     out = must_cli(journal_dir, "rank", "--mode", "keyword", "--top", "10",
                    "anything", "about", "auth", "or", "Alice?")
@@ -353,7 +348,7 @@ def run_check(binary):
     rng = (derivedref.DAY0, derivedref.DAY0 + 3)
     out = must_cli(journal_dir, "ask", "2026-01-01:2026-01-03",
                    "anything", "about", "auth", "or", "Alice?")
-    want = derivedref.render_pack(head, record_count, ves, question, rng)
+    want = derivedref.render_pack(record_count, ves, question, rng)
     expect_bytes(out, want.encode(), "ask silent-degrade pack")
 
     return problems
@@ -396,11 +391,12 @@ def mrr_of(top, gold):
 def parse_rank_seqs(out):
     seqs = []
     for line in out.decode().splitlines():
-        if line.startswith("#"):
+        line = line.strip()
+        if not line:
             continue
-        parts = line.split("\t")
-        if len(parts) >= 2:
-            seqs.append(int(parts[1]))
+        tok = line.split()[0]
+        if tok.isdigit():
+            seqs.append(int(tok))
     return seqs[:5]
 
 

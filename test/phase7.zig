@@ -256,18 +256,17 @@ test "phase 7: staleness — append and redact regenerate the artifacts" {
     const digest2 = try dstore.digestOrRebuild(allocator, f.journal, &v2.visible, range, v2.result);
     defer allocator.free(digest2);
     // Two redactions (seq 2, seq 3), four visible entries, and the new
-    // entry's tag pushes work to 2.
-    try std.testing.expect(contains(digest2, "4 entries (2 redacted)"));
-    try std.testing.expect(contains(digest2, "tags: work 2"));
+    // entry's tag pushes work to 2. The display body (no machine header).
+    try std.testing.expect(contains(digest2, "2026-01-01 \u{2013} 2026-01-01 \u{B7} 4 entries (2 redacted)"));
+    try std.testing.expect(contains(digest2, "tags  work 2"));
     try std.testing.expect(!std.mem.eql(u8, digest1, digest2));
 
-    // The profile follows on its next persisting read.
+    // The profile follows on its next persisting read. Without notes.md the
+    // notes section is omitted and the body stands at column 0.
     const prof = try dstore.profileWithNotes(allocator, f.journal, &v2.visible, v2.result);
     defer allocator.free(prof);
-    try std.testing.expect(contains(prof, "4 entries, 2026-01-01..2026-01-01 (2 redacted)"));
-    // No notes.md in this journal: the one-line note marks the boundary.
-    try std.testing.expect(contains(prof, "# notes"));
-    try std.testing.expect(contains(prof, "(no notes)"));
+    try std.testing.expect(contains(prof, "4 entries \u{B7} 2026-01-01 onward (2 redacted)"));
+    try std.testing.expect(!contains(prof, "notes"));
 }
 
 test "phase 7: indexed retrieval agrees with the brute-force oracle" {
@@ -347,9 +346,12 @@ test "phase 7: legacy profile migrates to notes exactly once" {
     const profile1 = (try readArtifact(allocator, f.journal, dstore.ProfileFile)).?;
     defer allocator.free(profile1);
     try std.testing.expect(std.mem.startsWith(u8, profile1, dstore.ProfileHeader));
-    try std.testing.expect(contains(out1, "# notes"));
-    try std.testing.expect(contains(out1, "I am a hand-written profile."));
-    try std.testing.expect(contains(out1, "Line two, with a Zephyr mention."));
+    // The notes presentation (spec/derived.md section 6): the notes under
+    // `notes`, the body under `about you`, both indented.
+    try std.testing.expect(contains(out1, "notes"));
+    try std.testing.expect(contains(out1, "  I am a hand-written profile."));
+    try std.testing.expect(contains(out1, "  Line two, with a Zephyr mention."));
+    try std.testing.expect(contains(out1, "about you"));
 
     // The user then extends their notes; a second run must change nothing.
     const user_note = "I like tea.\n";
@@ -383,6 +385,33 @@ test "phase 7: legacy profile migrates to notes exactly once" {
     const gnotes = (try readArtifact(allocator, g.journal, dstore.NotesFile)).?;
     defer allocator.free(gnotes);
     try std.testing.expectEqualStrings(try allocator.print("{s}\n{s}", .{ existing, legacy }), gnotes);
+
+    // A v1-header profile.md is stale, never legacy (spec/derived.md
+    // section 6): the next persisting read rewrites it as v2 without
+    // migrating its machine text into notes.md.
+    var h = try Fixture.init(allocator, io, ".tmp-phase7-h");
+    defer h.deinit(allocator);
+    try fillFixture(allocator, h.journal);
+    try writeArtifact(h.journal.dir, io, dstore.NotesFile, "sentinel notes\n");
+    try writeArtifact(
+        h.journal.dir,
+        io,
+        dstore.ProfileFile,
+        "# zephyr-profile: v1 range=none head=" ++
+            "0000000000000000000000000000000000000000000000000000000000000000\n" ++
+            "0 entries\n",
+    );
+    var hv = try visibleOf(allocator, h.journal);
+    defer hv.recs.deinit();
+    defer hv.visible.deinit();
+    const hout = try dstore.profileWithNotes(allocator, h.journal, &hv.visible, hv.result);
+    defer allocator.free(hout);
+    const hnotes = (try readArtifact(allocator, h.journal, dstore.NotesFile)).?;
+    defer allocator.free(hnotes);
+    try std.testing.expectEqualStrings("sentinel notes\n", hnotes);
+    const hprofile = (try readArtifact(allocator, h.journal, dstore.ProfileFile)).?;
+    defer allocator.free(hprofile);
+    try std.testing.expect(std.mem.startsWith(u8, hprofile, dstore.ProfileHeader));
 }
 
 test "phase 7: status reports states; rebuild restores; notes untouched" {

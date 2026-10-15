@@ -2,7 +2,8 @@
 //!
 //!   - `private` content never reaches the rendered LLM view.
 //!   - The exporter refuses to render a log that fails verify.
-//!   - Tokens per entry beat the raw JSON baseline (target in README §5.5).
+//!   - Tokens per entry beat the raw JSON baseline (target in
+//!     docs/features.md).
 //!
 //! Cross-implementation byte identity of the view itself is the Phase 0
 //! vector contract (spec/vectors/journals.json `expect.view`, checked by
@@ -178,14 +179,17 @@ test "phase 4: tokens per entry beat raw JSON" {
     std.debug.print("  ratio (llm/JSONL):     {d:.2}\n", .{ratio});
 
     // The gate: the LLM view beats raw JSON, and stays under the target
-    // ceiling (README §5.5).
+    // ceiling (docs/features.md).
     try std.testing.expect(view_tokens < jsonl_tokens);
     try std.testing.expect(view_tokens <= TargetViewTokensTotal);
 }
 
-/// Regression ceiling for the 10k-entry measurement above (README §5.5):
-/// 9.0 tokens/entry, ~2% above the 8.80 measured for this entry profile.
-const TargetViewTokensTotal: u64 = 90_000;
+/// Regression ceiling for the 10k-entry measurement above
+/// (docs/features.md):
+/// 11.0 tokens/entry, ~2% above the 10.77 measured for this entry profile.
+/// (Phase B's bare-seq entry prefix adds ~8 bytes per entry over the
+/// pre-Phase-B 8.80.)
+const TargetViewTokensTotal: u64 = 110_000;
 
 fn readSeg(allocator: Allocator, io: Io, dir_path: []const u8, name: []const u8) (Allocator.Error || Dir.OpenError || Dir.ReadFileAllocError)![]u8 {
     const d = try Dir.openDirAbsolute(io, dir_path, .{});

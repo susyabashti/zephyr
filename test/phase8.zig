@@ -707,10 +707,10 @@ test "phase 8: contextPack — the hybrid list is the fusion order" {
     const range = view.DayRange{ .start = D0, .end = D0 + 1 };
     const question = "auth";
 
-    // Keyword-only (the Phase 7 bytes, unchanged by the new parameter).
+    // Keyword-only (unchanged by the new parameter).
     const pack_kw = try dstore.contextPack(allocator, f.journal, &v.visible, v.result, question, range, true, null);
     defer allocator.free(pack_kw);
-    try std.testing.expect(indexOf(pack_kw, "# 2 matches for \"auth\"\n") != null);
+    try std.testing.expect(indexOf(pack_kw, "Matching entries\n") != null);
 
     // Build the artifact and take the hybrid path.
     const engine = try FakeEngine.init(allocator, "pack-identity");
@@ -732,7 +732,7 @@ test "phase 8: contextPack — the hybrid list is the fusion order" {
     //   5 -> 1/62 + 1/61,  0 -> 1/61 + 1/63,  3 -> 1/62
     // which differs from both: [5, 0, 3].
     try std.testing.expect(!std.mem.eql(u8, pack_kw, pack_hyb));
-    const hyb_head = "# 3 matches for \"auth\"\n";
+    const hyb_head = "Matching entries\n";
     const at = indexOf(pack_hyb, hyb_head) orelse std.debug.panic("hybrid pack has no matches section", .{});
     const matches = pack_hyb[at..];
     const pos5 = indexOf(matches, "shipped the auth token fix") orelse std.debug.panic("no seq 5 in hybrid matches", .{});

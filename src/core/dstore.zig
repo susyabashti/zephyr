@@ -28,7 +28,11 @@ pub const IndexFile = "derived/index.zdi";
 pub const EmbedFile = "derived/embed.zde";
 pub const ProfileFile = "profile.md";
 pub const NotesFile = "notes.md";
-pub const ProfileHeader = "# zephyr-profile: v1 ";
+pub const ProfileHeader = "# zephyr-profile: v2 ";
+/// The pre-v2 header: a v1 document is stale (rewritten by the next
+/// persisting read), never legacy — migrating it would append its machine
+/// text to the user's notes.md (spec/derived.md section 6).
+const LegacyV1Header = "# zephyr-profile: v1 ";
 
 /// Default cap on the pack's rendered match lines (spec/derived.md section 7).
 pub const PackMatchCap: usize = 8 << 10;
@@ -284,12 +288,13 @@ pub fn saveProfile(journal: *const journal_mod.Journal, bytes: []const u8) IoErr
 
 /// Moves a pre-Phase-7 hand-written profile.md into notes.md (spec/derived.md
 /// section 6): the legacy text is appended to the existing notes (blank line
-/// between) or written as notes.md. Idempotent — a versioned profile or a
-/// missing file is a no-op.
+/// between) or written as notes.md. Idempotent — a file starting with the v1
+/// or the v2 version header is versioned and left alone, as is a missing
+/// file.
 pub fn migrateLegacyProfile(allocator: Allocator, journal: *const journal_mod.Journal) IoError!void {
     const doc = (try readJournalOrNull(allocator, journal, ProfileFile)) orelse return;
     defer allocator.free(doc);
-    if (std.mem.startsWith(u8, doc, ProfileHeader)) return;
+    if (std.mem.startsWith(u8, doc, ProfileHeader) or std.mem.startsWith(u8, doc, LegacyV1Header)) return;
 
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
@@ -308,14 +313,49 @@ pub fn migrateLegacyProfile(allocator: Allocator, journal: *const journal_mod.Jo
 
 pub const PackError = Allocator.Error || IoError || derived.BuildIndexError ||
     derived.DecodeIndexError || derived.DigestError || derived.ProfileError ||
-    search.RenderError || error{TimestampOutOfRange};
+    search.RenderError || ResolveRangeError || error{TimestampOutOfRange};
 
-/// Assembles the context pack (spec/derived.md section 7): provenance,
-/// question, derived profile, notes, the period digest (when `range` is set),
-/// keyword matches, and the answer footer. `result` must be the journal's
-/// current verify result. `persist` controls whether stale or missing
-/// artifacts are written back (CLI) or computed in memory only (MCP);
-/// migration runs only when `persist` is set.
+/// `s` with a trailing newline guaranteed: an owned copy when `s` does not
+/// end with one, null when it already does (the caller keeps using `s`).
+fn normalizeNewline(allocator: Allocator, s: []const u8) Allocator.Error!?[]u8 {
+    if (s.len > 0 and s[s.len - 1] == '\n') return null;
+    const out = try allocator.alloc(u8, s.len + 1);
+    errdefer allocator.free(out);
+    @memcpy(out, s);
+    out[s.len] = '\n';
+    return out;
+}
+
+/// Indents the non-empty lines of `s` by two spaces (blank lines stay
+/// empty) — the presentation rule for the pack and the profile display
+/// (spec/derived.md sections 6 and 7).
+fn indent2(allocator: Allocator, s: []const u8) Allocator.Error![]u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i <= s.len) : (i += 1) {
+        if (i == s.len or s[i] == '\n') {
+            if (i - start > 0) {
+                try out.appendSlice(allocator, "  ");
+                try out.appendSlice(allocator, s[start..i]);
+            }
+            if (i < s.len) try out.append(allocator, '\n');
+            start = i + 1;
+        }
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// Assembles the context pack (spec/derived.md section 7): question,
+/// profile display body, notes, the covered period's digest body, match
+/// lines, and the answer footer — one document, sections separated by one
+/// blank line, indented blocks two-spaced. No provenance. `result` must be
+/// the journal's current verify result. `persist` controls whether stale or
+/// missing artifacts are written back (CLI) or computed in memory only
+/// (MCP); migration runs only when `persist` is set. `range` is the
+/// explicit `from:to` (null when the user gave none); the period is
+/// resolved internally (ISO date in the question, else the current week).
 pub fn contextPack(
     allocator: Allocator,
     journal: *const journal_mod.Journal,
@@ -331,19 +371,12 @@ pub fn contextPack(
         for (parts.items) |p| allocator.free(p);
         allocator.free(parts.items);
     }
-    const head_hex = try derived.hexLower(allocator, &result.head);
-    defer allocator.free(head_hex);
 
-    // 1. Provenance line (same shape as the MCP server and the LLM view).
-    const last_seq: u64 = if (result.record_count == 0) 0 else result.record_count - 1;
-    const prov = try allocator.print("# zephyr: seq 0..{d} head={s}\n", .{ last_seq, head_hex });
-    try parts.append(allocator, prov);
+    // 1. Question verbatim, then the section separator.
+    try parts.append(allocator, try allocator.print("Question: {s}\n", .{question}));
+    try parts.append(allocator, try allocator.dupe(u8, "\n"));
 
-    // 2. Question verbatim.
-    const q = try allocator.print("# question: {s}\n", .{question});
-    try parts.append(allocator, q);
-
-    // 3. Index (retrieval + profile entities): fresh from disk or rebuilt.
+    // 2. Index (retrieval + profile entities): fresh from disk or rebuilt.
     const idx = (try loadFreshIndex(allocator, journal, result)) orelse blk: {
         const fresh = try derived.buildIndex(allocator, visible, result.head, result.record_count);
         if (persist) try saveIndex(allocator, journal, fresh);
@@ -351,55 +384,74 @@ pub fn contextPack(
     };
     defer idx.deinit();
 
-    // 4. Profile (persist: migrate a legacy document first, then rewrite).
-    if (persist) try migrateLegacyProfile(allocator, journal);
-    const profile = (try loadFreshProfile(allocator, journal, result)) orelse blk: {
-        const fresh = try derived.renderProfile(allocator, visible, idx.entities, result.record_count, result.head);
-        if (persist) try saveProfile(journal, fresh);
-        break :blk fresh;
-    };
-    try parts.append(allocator, profile);
+    // 3. Profile: the display renders from the computed data; the on-disk
+    //    artifact is only kept fresh (persist) for `derived status` and
+    //    inspection.
+    if (persist) {
+        try migrateLegacyProfile(allocator, journal);
+        if (try loadFreshProfile(allocator, journal, result)) |doc| {
+            allocator.free(doc);
+        } else {
+            const fresh = try derived.renderProfile(allocator, visible, idx.entities, result.record_count, result.head);
+            try saveProfile(journal, fresh);
+            allocator.free(fresh);
+        }
+    }
+    try parts.append(allocator, try allocator.dupe(u8, "Your profile\n"));
+    const profile_body = try derived.renderProfileBody(allocator, visible, idx.entities);
+    const indented_profile = try indent2(allocator, profile_body);
+    allocator.free(profile_body);
+    try parts.append(allocator, indented_profile);
 
-    // 5. Notes, under a heading so the AI can tell machine from voice.
+    // 4. Notes, verbatim, when notes.md exists.
     if ((try readJournalOrNull(allocator, journal, NotesFile))) |notes| {
-        const joined = blk: {
-            const sep = if (notes.len > 0 and notes[notes.len - 1] != '\n') "\n" else "";
-            break :blk try allocator.print("# notes\n{s}{s}", .{ notes, sep });
-        };
-        allocator.free(notes);
-        try parts.append(allocator, joined);
+        defer allocator.free(notes);
+        const norm = try normalizeNewline(allocator, notes);
+        defer if (norm) |n| allocator.free(n);
+        try parts.append(allocator, try allocator.dupe(u8, "\nNotes\n"));
+        try parts.append(allocator, try indent2(allocator, norm orelse notes));
     }
 
-    // 6. Digest for the resolved period (fresh from disk or rebuilt).
-    if (range) |r| {
-        const digest = (try loadFreshDigest(allocator, journal, r, result)) orelse blk: {
-            const fresh = try derived.renderDigest(allocator, visible, r, result.head);
-            if (persist) try saveDigest(allocator, journal, r, fresh);
-            break :blk fresh;
-        };
-        try parts.append(allocator, digest);
+    // 5. Digest for the covered period (the explicit range, the question's
+    //    ISO date, or the current week), kept fresh when persisting.
+    const is_week = range == null and firstIsoDate(question) == null;
+    const pack_range = try resolveRange(journal.io, journal, range, question);
+    if (persist) {
+        if (try loadFreshDigest(allocator, journal, pack_range, result)) |doc| {
+            allocator.free(doc);
+        } else {
+            const fresh = try derived.renderDigest(allocator, visible, pack_range, result.head);
+            try saveDigest(allocator, journal, pack_range, fresh);
+            allocator.free(fresh);
+        }
     }
+    try parts.append(allocator, try allocator.print("\n{s}\n", .{if (is_week) "This week" else "Period"}));
+    const digest_body = try derived.renderDigestBody(allocator, visible, pack_range);
+    const indented_digest = try indent2(allocator, digest_body);
+    allocator.free(digest_body);
+    try parts.append(allocator, indented_digest);
 
-    // 7. Retrieval: the hybrid (RRF) list when the vector artifact is
-    //    fresh, else the Phase 7 keyword list (spec/semantic.md section 6).
-    //    Same period scoping, same cap, same line format either way.
+    // 6. Retrieval: the hybrid (RRF) list when the vector artifact is
+    //    fresh, else the keyword list (spec/semantic.md section 6),
+    //    scoped to the covered period.
     var matches: []search.Match = undefined;
     if (hybrid) |h| {
-        matches = try hybridMatches(allocator, visible, &h, question, range);
+        matches = try hybridMatches(allocator, visible, &h, question, pack_range);
     } else {
-        matches = try retrieve(allocator, visible, &idx, question, range, result.record_count);
+        matches = try retrieve(allocator, visible, &idx, question, pack_range, result.record_count);
     }
     if (matches.len > 0) {
-        const rendered = try search.renderCapped(allocator, matches, question, PackMatchCap);
-        allocator.free(matches);
-        try parts.append(allocator, rendered);
+        try parts.append(allocator, try allocator.dupe(u8, "\nMatching entries\n"));
+        const match_lines = try search.renderLines(allocator, matches, PackMatchCap);
+        const indented_matches = try indent2(allocator, match_lines);
+        allocator.free(match_lines);
+        try parts.append(allocator, indented_matches);
     }
+    allocator.free(matches);
 
-    // 8. Answer footer. (Allocated: every part of the pack is a real
-    //    allocation, so the uniform free below is exact.)
-    const footer = try allocator.dupe(u8, "Answer using only the entries above; cite seqs; say so if the " ++
-        "answer is not present.\n");
-    try parts.append(allocator, footer);
+    // 7. Footer.
+    try parts.append(allocator, try allocator.dupe(u8, "\nAnswer using only the entries above; cite seqs; say so if the " ++
+        "answer is not present.\n"));
 
     // Join, then release the parts (errdefers are error-path only; nothing
     // fallible follows).
@@ -588,8 +640,9 @@ pub fn resolveRange(
 
 // ---------------------------------------------------------------- digest or rebuild
 
-/// The stored digest for `range` when fresh; otherwise rendered and
-/// stored. Backs `zephyr recap`.
+/// The digest display body for `range`; the stored artifact is kept fresh
+/// (regenerated and stored when stale or missing) so `derived status` and
+/// inspection stay true. Backs `zephyr recap`.
 pub fn digestOrRebuild(
     allocator: Allocator,
     journal: *const journal_mod.Journal,
@@ -597,18 +650,53 @@ pub fn digestOrRebuild(
     range: view.DayRange,
     result: journal_mod.VerifyResult,
 ) (Allocator.Error || IoError || derived.DigestError || error{TimestampOutOfRange})![]u8 {
-    if (try loadFreshDigest(allocator, journal, range, result)) |doc| return doc;
-    const fresh = try derived.renderDigest(allocator, visible, range, result.head);
-    try saveDigest(allocator, journal, range, fresh);
-    return fresh;
+    if (try loadFreshDigest(allocator, journal, range, result)) |doc| {
+        allocator.free(doc);
+    } else {
+        const fresh = try derived.renderDigest(allocator, visible, range, result.head);
+        try saveDigest(allocator, journal, range, fresh);
+        allocator.free(fresh);
+    }
+    return derived.renderDigestBody(allocator, visible, range);
 }
 
 // ---------------------------------------------------------------- profile + notes
 
-/// The derived profile (stored when stale or missing, a legacy document
-/// migrated first) followed by the user's notes under `# notes`, or a
-/// one-line note when `notes.md` is absent (spec/derived.md section 6).
-/// Backs `zephyr profile`.
+/// The profile display for `zephyr profile` and `get_profile`
+/// (spec/derived.md section 6): when `notes.md` exists, the notes section
+/// (`notes`, the file verbatim indented, a blank line, `about you`, the
+/// display body indented); without notes the body stands at column 0. Reads
+/// `notes.md` only — it never writes.
+pub fn renderProfileDisplay(
+    allocator: Allocator,
+    journal: *const journal_mod.Journal,
+    visible: *const view.Visible,
+    entities: []const derived.Entity,
+) PackError![]u8 {
+    const body = try derived.renderProfileBody(allocator, visible, entities);
+    const notes = (try readJournalOrNull(allocator, journal, NotesFile)) orelse return body;
+    errdefer allocator.free(body);
+    errdefer allocator.free(notes);
+    const norm = try normalizeNewline(allocator, notes);
+    errdefer if (norm) |n| allocator.free(n);
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, "notes\n");
+    const indented_notes = try indent2(allocator, norm orelse notes);
+    errdefer allocator.free(indented_notes);
+    try out.appendSlice(allocator, indented_notes);
+    try out.append(allocator, '\n'); // blank line between the sections
+    try out.appendSlice(allocator, "about you\n");
+    const indented_body = try indent2(allocator, body);
+    errdefer allocator.free(indented_body);
+    try out.appendSlice(allocator, indented_body);
+    return try out.toOwnedSlice(allocator);
+}
+
+/// The profile display (notes presentation when `notes.md` exists) with the
+/// derived artifacts kept fresh: a legacy document is migrated first, and
+/// stale or missing index/profile artifacts are rebuilt and stored. Backs
+/// `zephyr profile`.
 pub fn profileWithNotes(
     allocator: Allocator,
     journal: *const journal_mod.Journal,
@@ -622,25 +710,14 @@ pub fn profileWithNotes(
         break :blk fresh;
     };
     defer idx.deinit();
-    const profile = (try loadFreshProfile(allocator, journal, result)) orelse blk: {
+    if (try loadFreshProfile(allocator, journal, result)) |doc| {
+        allocator.free(doc);
+    } else {
         const fresh = try derived.renderProfile(allocator, visible, idx.entities, result.record_count, result.head);
         try saveProfile(journal, fresh);
-        break :blk fresh;
-    };
-    const notes_section = blk: {
-        if ((try readJournalOrNull(allocator, journal, NotesFile))) |notes| {
-            const sep = if (notes.len > 0 and notes[notes.len - 1] != '\n') "\n" else "";
-            break :blk try allocator.print("# notes\n{s}{s}", .{ notes, sep });
-        }
-        break :blk try allocator.dupe(u8, "# notes\n(no notes)");
-    };
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, profile);
-    try out.appendSlice(allocator, notes_section);
-    allocator.free(profile);
-    allocator.free(notes_section);
-    return try out.toOwnedSlice(allocator);
+        allocator.free(fresh);
+    }
+    return renderProfileDisplay(allocator, journal, visible, idx.entities);
 }
 
 // ---------------------------------------------------------------- status

@@ -1,9 +1,9 @@
 //! zephyr ask [from:to] <question...> — the deterministic context pack for
-//! the user's AI (spec/derived.md section 7): provenance, question,
-//! profile, notes, period digest, matches. Hybrid retrieval (spec/semantic.md
-//! section 6) when the vector artifact is fresh and the model is available;
-//! any failure degrades silently to the keyword list — `ask` never fails
-//! over embeddings.
+//! the user's AI (spec/derived.md section 7): question, profile, notes,
+//! period digest, matches. Hybrid retrieval (spec/semantic.md section 6)
+//! when the vector artifact is fresh and the model is available; any
+//! failure degrades silently to the keyword list — `ask` never fails over
+//! embeddings.
 
 const std = @import("std");
 const core = @import("zephyr_core");
@@ -45,9 +45,6 @@ pub fn run(
     defer recs.deinit();
     const visible = try core.view.visibleEntries(arena, recs.headers, recs.payloads);
     defer visible.deinit();
-    // Period: the explicit range, else a YYYY-MM-DD in the question, else
-    // the current week (spec/derived.md section 7, step 4).
-    const pack_range = try core.dstore.resolveRange(io, &journal, range, question);
     // Hybrid retrieval when the vector artifact is fresh and the model is
     // available; any failure degrades silently to the keyword list
     // (spec/semantic.md section 6) — `ask` never fails over embeddings.
@@ -79,6 +76,9 @@ pub fn run(
             }
         }
     }
-    const pack = try core.dstore.contextPack(arena, &journal, &visible, result, question, pack_range, true, hybrid);
+    // The explicit range (possibly null): the period — the range, else a
+    // YYYY-MM-DD in the question, else the current week — is resolved
+    // inside the pack (spec/derived.md section 7, step 5).
+    const pack = try core.dstore.contextPack(arena, &journal, &visible, result, question, range, true, hybrid);
     try output.printBlock(out, io, pack);
 }

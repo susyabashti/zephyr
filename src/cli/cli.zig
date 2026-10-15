@@ -96,7 +96,7 @@ pub fn run(init: std.process.Init, argv: []const []const u8) RunError!void {
     if (std.mem.eql(u8, command, "log")) {
         return log_cmd.run(arena, gpa, io, style, init.environ_map, path, rest);
     } else if (std.mem.eql(u8, command, "verify")) {
-        return verify_cmd.run(arena, io, style, err_file, out, init.environ_map, path);
+        return verify_cmd.run(arena, io, style, err_file, out, init.environ_map, path, rest);
     } else if (std.mem.eql(u8, command, "today") or std.mem.eql(u8, command, "yesterday") or std.mem.eql(u8, command, "week")) {
         return views_cmd.runDayView(arena, io, style, err_file, out, init.environ_map, path, command);
     } else if (std.mem.eql(u8, command, "on")) {

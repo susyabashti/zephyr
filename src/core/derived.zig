@@ -521,15 +521,29 @@ fn readU32be(b: []const u8) ?u32 {
 
 pub const DigestError = Allocator.Error || error{TimestampOutOfRange};
 
-/// Renders the digest artifact for `range` (spec/derived.md section 5).
-/// Pure in (visible, range, head): the tag histogram counts distinct
-/// entries, top words count token occurrences over entry text.
-pub fn renderDigest(
+/// The period's histograms: tag counts (tag bytes borrow from the payloads)
+/// and word counts (owned bytes), both sorted count desc then name asc.
+const DigestStats = struct {
+    n: usize,
+    redacted: usize,
+    min_seq: u64,
+    max_seq: u64,
+    tags: []TagCount,
+    words: []TagCount,
     allocator: Allocator,
-    visible: *const view.Visible,
-    range: view.DayRange,
-    head: [records.DigestLen]u8,
-) DigestError![]u8 {
+
+    fn deinit(self: DigestStats) void {
+        const allocator = self.allocator;
+        allocator.free(self.tags);
+        for (self.words) |wc| allocator.free(wc.tag);
+        allocator.free(self.words);
+    }
+};
+
+/// Computes the digest histograms for `range` (spec/derived.md section 5):
+/// the tag histogram counts distinct entries, top words count token
+/// occurrences over entry text. Pure in (visible, range).
+fn digestStats(allocator: Allocator, visible: *const view.Visible, range: view.DayRange) DigestError!DigestStats {
     var tag_pairs = std.ArrayList(TagPair).empty;
     errdefer tag_pairs.deinit(allocator); // tag strings borrow from payloads
     var word_toks = std.ArrayList([]const u8).empty;
@@ -577,47 +591,71 @@ pub fn renderDigest(
             i = j;
         }
     }
+    std.mem.sort(TagPair, tag_pairs.items, {}, tagPairLessThan);
+    var counts = std.ArrayList(TagCount).empty;
+    errdefer counts.deinit(allocator); // tags borrow from payloads
+    var i: usize = 0;
+    while (i < tag_pairs.items.len) {
+        const tag = tag_pairs.items[i].tag;
+        var j = i;
+        while (j < tag_pairs.items.len and std.mem.eql(u8, tag_pairs.items[j].tag, tag)) j += 1;
+        try counts.append(allocator, .{ .tag = tag, .count = @intCast(j - i) });
+        i = j;
+    }
+    std.mem.sort(TagCount, counts.items, {}, tagCountLessThan);
+    std.mem.sort(TagCount, word_counts.items, {}, tagCountLessThan);
+    const tags = try allocator.alloc(TagCount, counts.items.len);
+    errdefer allocator.free(tags);
+    const words = try allocator.alloc(TagCount, word_counts.items.len);
+    errdefer allocator.free(words);
+    @memcpy(tags, counts.items);
+    @memcpy(words, word_counts.items);
+    // Success: nothing fallible follows; the grouping buffers are freed
+    // explicitly (the errdefers are error-path only). The owned word bytes
+    // live on in `words` and are freed by DigestStats.deinit.
+    counts.deinit(allocator);
+    word_counts.deinit(allocator);
+    tag_pairs.deinit(allocator);
+    for (word_toks.items) |t| allocator.free(t);
+    allocator.free(word_toks.items);
+    return DigestStats{
+        .n = n,
+        .redacted = redacted,
+        .min_seq = min_seq,
+        .max_seq = max_seq,
+        .tags = tags,
+        .words = words,
+        .allocator = allocator,
+    };
+}
 
+/// The digest display body (spec/derived.md section 5): the period line
+/// (` – `, U+2013), a blank line, then the tag histogram and the top words
+/// (cap 10); an empty period renders the period line alone.
+fn renderDigestBodyFromStats(allocator: Allocator, stats: *const DigestStats, d0: view.CivilDate, d1: view.CivilDate) DigestError![]u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
-    const d0 = view.civilDate(range.start) catch return error.TimestampOutOfRange;
-    const d1 = view.civilDate(range.end - 1) catch return error.TimestampOutOfRange;
-    try line(allocator, &out, "# zephyr-digest: period={d:0>4}-{d:0>2}-{d:0>2}..{d:0>4}-{d:0>2}-{d:0>2} range=seq {d}..{d} head={s}\n", .{
-        d0.year,                   d0.month,                  d0.day,                         d1.year, d1.month, d1.day,
-        if (n > 0) min_seq else 0, if (n > 0) max_seq else 0, try hexLower(allocator, &head),
+    try line(allocator, &out, "{d:0>4}-{d:0>2}-{d:0>2} \u{2013} {d:0>4}-{d:0>2}-{d:0>2} \u{B7} {d} {s}", .{
+        d0.year, d0.month, d0.day, d1.year, d1.month, d1.day, stats.n, view.countNoun(stats.n, "entry", "entries"),
     });
-    if (n == 0) {
-        try out.appendSlice(allocator, "0 entries\n");
-    } else {
-        if (redacted > 0) {
-            try line(allocator, &out, "{d} entries ({d} redacted)\n", .{ n, redacted });
-        } else {
-            try line(allocator, &out, "{d} entries\n", .{n});
-        }
-        if (tag_pairs.items.len > 0) {
-            std.mem.sort(TagPair, tag_pairs.items, {}, tagPairLessThan);
-            var counts = std.ArrayList(TagCount).empty;
-            errdefer counts.deinit(allocator); // tags borrow from payloads
-            var i: usize = 0;
-            while (i < tag_pairs.items.len) {
-                const tag = tag_pairs.items[i].tag;
-                var j = i;
-                while (j < tag_pairs.items.len and std.mem.eql(u8, tag_pairs.items[j].tag, tag)) j += 1;
-                try counts.append(allocator, .{ .tag = tag, .count = @intCast(j - i) });
-                i = j;
-            }
-            std.mem.sort(TagCount, counts.items, {}, tagCountLessThan);
-            try out.appendSlice(allocator, "tags: ");
-            for (counts.items, 0..) |tc, idx| {
+    if (stats.redacted > 0) {
+        try line(allocator, &out, " ({d} redacted)", .{stats.redacted});
+    }
+    try out.append(allocator, '\n');
+    if (stats.n > 0) {
+        if (stats.tags.len > 0) {
+            try out.append(allocator, '\n'); // blank line before the tag/word lines
+            try out.appendSlice(allocator, "tags  ");
+            for (stats.tags, 0..) |tc, idx| {
                 if (idx > 0) try out.appendSlice(allocator, ", ");
                 try line(allocator, &out, "{s} {d}", .{ tc.tag, tc.count });
             }
             try out.append(allocator, '\n');
         }
-        if (word_counts.items.len > 0) {
-            std.mem.sort(TagCount, word_counts.items, {}, tagCountLessThan);
-            const top = word_counts.items[0..@min(20, word_counts.items.len)];
-            try out.appendSlice(allocator, "top words: ");
+        if (stats.words.len > 0) {
+            if (stats.tags.len == 0) try out.append(allocator, '\n');
+            const top = stats.words[0..@min(10, stats.words.len)];
+            try out.appendSlice(allocator, "top words  ");
             for (top, 0..) |tc, idx| {
                 if (idx > 0) try out.appendSlice(allocator, ", ");
                 try line(allocator, &out, "{s} {d}", .{ tc.tag, tc.count });
@@ -625,15 +663,41 @@ pub fn renderDigest(
             try out.append(allocator, '\n');
         }
     }
-    const result = try out.toOwnedSlice(allocator);
-    // Success cleanup (errdefers are error-path only); nothing fallible
-    // follows.
-    tag_pairs.deinit(allocator);
-    for (word_toks.items) |t| allocator.free(t);
-    allocator.free(word_toks.items);
-    for (word_counts.items) |wc| allocator.free(wc.tag);
-    allocator.free(word_counts.items);
-    return result;
+    return out.toOwnedSlice(allocator);
+}
+
+/// Renders the digest display body for `range` (spec/derived.md section 5).
+pub fn renderDigestBody(allocator: Allocator, visible: *const view.Visible, range: view.DayRange) DigestError![]u8 {
+    const stats = try digestStats(allocator, visible, range);
+    defer stats.deinit();
+    const d0 = view.civilDate(range.start) catch return error.TimestampOutOfRange;
+    const d1 = view.civilDate(range.end - 1) catch return error.TimestampOutOfRange;
+    return renderDigestBodyFromStats(allocator, &stats, d0, d1);
+}
+
+/// Renders the digest artifact for `range` (spec/derived.md section 5): the
+/// machine header (period, seq range of the entries it covers, head at
+/// build) followed by the display body.
+pub fn renderDigest(
+    allocator: Allocator,
+    visible: *const view.Visible,
+    range: view.DayRange,
+    head: [records.DigestLen]u8,
+) DigestError![]u8 {
+    const stats = try digestStats(allocator, visible, range);
+    defer stats.deinit();
+    const d0 = view.civilDate(range.start) catch return error.TimestampOutOfRange;
+    const d1 = view.civilDate(range.end - 1) catch return error.TimestampOutOfRange;
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+    try line(allocator, &out, "# zephyr-digest: period={d:0>4}-{d:0>2}-{d:0>2}..{d:0>4}-{d:0>2}-{d:0>2} range=seq {d}..{d} head={s}\n", .{
+        d0.year,                               d0.month,                              d0.day,                         d1.year, d1.month, d1.day,
+        if (stats.n > 0) stats.min_seq else 0, if (stats.n > 0) stats.max_seq else 0, try hexLower(allocator, &head),
+    });
+    const body = try renderDigestBodyFromStats(allocator, &stats, d0, d1);
+    defer allocator.free(body);
+    try out.appendSlice(allocator, body);
+    return out.toOwnedSlice(allocator);
 }
 
 const TagPair = struct { tag: []const u8, seq: u64 };
@@ -661,46 +725,31 @@ fn line(allocator: Allocator, out: *std.ArrayList(u8), comptime fmt: []const u8,
 
 pub const ProfileError = Allocator.Error || error{TimestampOutOfRange};
 
-/// Renders the derived profile (spec/derived.md section 6): a version
-/// header (v = profile format version), the span line, the most active
-/// month, and the top-10 entities per kind (count desc, name asc).
-/// `entities` is the index's entity list; `record_count` the journal's.
-pub fn renderProfile(
-    allocator: Allocator,
-    visible: *const view.Visible,
-    entities: []const Entity,
-    record_count: u64,
-    head: [records.DigestLen]u8,
-) ProfileError![]u8 {
-    const head_hex = try hexLower(allocator, &head);
-    defer allocator.free(head_hex);
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(allocator);
+/// The number of redacted entries in `visible`.
+fn redactedCount(visible: *const view.Visible) usize {
+    var r: usize = 0;
+    for (visible.entries) |e| {
+        if (e.redacted) r += 1;
+    }
+    return r;
+}
+
+/// The earliest local day of `visible`, or null when empty.
+fn firstDay(visible: *const view.Visible) ?i64 {
+    if (visible.entries.len == 0) return null;
+    var d: i64 = visible.entries[0].day;
+    for (visible.entries) |e| d = @min(d, e.day);
+    return d;
+}
+
+/// The fullest month across `visible` (earliest month wins ties), or null
+/// when empty. The key's zero-based month index makes key % 12 the month.
+fn bestMonth(allocator: Allocator, visible: *const view.Visible) ProfileError!?MonthCount {
+    if (visible.entries.len == 0) return null;
     var months = std.ArrayList(MonthCount).empty;
     errdefer months.deinit(allocator);
-    const n = visible.entries.len;
-    if (n == 0) {
-        var range: []const u8 = "none";
-        var owned_range: ?[]const u8 = null;
-        if (record_count > 0) {
-            owned_range = try allocator.print("seq 0..{d}", .{record_count - 1});
-            range = owned_range.?;
-        }
-        try line(allocator, &out, "# zephyr-profile: v1 range={s} head={s}\n", .{ range, head_hex });
-        try out.appendSlice(allocator, "0 entries\n");
-        const result = try out.toOwnedSlice(allocator);
-        if (owned_range) |r| allocator.free(r);
-        return result;
-    }
-    var min_day: i64 = std.math.maxInt(i64);
-    var max_day: i64 = std.math.minInt(i64);
-    var redacted: usize = 0;
     for (visible.entries) |e| {
-        if (e.redacted) redacted += 1;
-        min_day = @min(min_day, e.day);
-        max_day = @max(max_day, e.day);
         const d = view.civilDate(e.day) catch return error.TimestampOutOfRange;
-        // Zero-based month index so key % 12 is the month.
         const key: i64 = @as(i64, @intCast(d.year)) * 12 + @as(i64, @intCast(d.month)) - 1;
         var found = false;
         for (months.items) |*m| {
@@ -717,60 +766,113 @@ pub fn renderProfile(
     for (months.items) |m| {
         if (m.count > best.count) best = m; // earliest key wins ties (sorted)
     }
-    const first = view.civilDate(min_day) catch return error.TimestampOutOfRange;
-    const last_d = view.civilDate(max_day) catch return error.TimestampOutOfRange;
-    try line(allocator, &out, "# zephyr-profile: v1 range=seq 0..{d} head={s}\n", .{ record_count - 1, head_hex });
-    if (redacted > 0) {
-        try line(allocator, &out, "{d} entries, {d:0>4}-{d:0>2}-{d:0>2}..{d:0>4}-{d:0>2}-{d:0>2} ({d} redacted)\n", .{
-            n, first.year, first.month, first.day, last_d.year, last_d.month, last_d.day, redacted,
-        });
-    } else {
-        try line(allocator, &out, "{d} entries, {d:0>4}-{d:0>2}-{d:0>2}..{d:0>4}-{d:0>2}-{d:0>2}\n", .{
-            n, first.year, first.month, first.day, last_d.year, last_d.month, last_d.day,
-        });
-    }
-    try line(allocator, &out, "most active: {d:0>4}-{d:0>2} ({d} entries)\n", .{
-        @as(u64, @intCast(@divTrunc(best.key, 12))), @as(u64, @intCast(@mod(best.key, 12))) + 1, best.count,
-    });
-    var tops = [_]?[]*const Entity{ null, null }; // per kind, top 10 each
-    errdefer {
-        if (tops[0]) |t| allocator.free(t);
-        if (tops[1]) |t| allocator.free(t);
-    }
-    for ([2]u8{ 0, 1 }) |want_kind| {
-        var list = std.ArrayList(*const Entity).empty;
-        errdefer list.deinit(allocator);
-        for (entities) |*e| {
-            if (@backingInt(e.kind) == want_kind) try list.append(allocator, e);
-        }
-        if (list.items.len == 0) continue;
-        std.mem.sort(*const Entity, list.items, {}, entityCountLessThan);
-        const top = try allocator.alloc(*const Entity, @min(10, list.items.len));
-        errdefer allocator.free(top);
-        @memcpy(top, list.items[0..top.len]);
-        tops[want_kind] = top;
-    }
-    for (tops, 0..) |top, kind_idx| {
-        if (top == null) continue;
-        const t = top.?;
-        if (kind_idx == 0) {
-            try out.appendSlice(allocator, "tags: ");
-        } else {
-            try out.appendSlice(allocator, "people and places: ");
-        }
-        for (t, 0..) |e, idx| {
-            if (idx > 0) try out.appendSlice(allocator, ", ");
-            try line(allocator, &out, "{s} {d}", .{ e.name, e.count });
-        }
-        try out.append(allocator, '\n');
-    }
-    const result = try out.toOwnedSlice(allocator);
-    // Success cleanup (errdefers are error-path only); nothing fallible
-    // follows.
-    months.deinit(allocator);
-    if (tops[0]) |t| allocator.free(t);
-    if (tops[1]) |t| allocator.free(t);
+    const result: ?MonthCount = best;
+    months.deinit(allocator); // success: nothing fallible follows
     return result;
+}
+
+/// The top-10 entity names of `kind` (0 = tag, 1 = phrase) — count
+/// descending, then name ascending — joined with ", ". The names borrow
+/// from `entities`; the caller frees the joined string. Null when
+/// `entities` holds none of the kind.
+fn entityNames(allocator: Allocator, entities: []const Entity, kind: u8) Allocator.Error!?[]u8 {
+    var list = std.ArrayList(*const Entity).empty;
+    errdefer list.deinit(allocator);
+    for (entities) |*e| {
+        if (@backingInt(e.kind) == kind) try list.append(allocator, e);
+    }
+    if (list.items.len == 0) return null;
+    std.mem.sort(*const Entity, list.items, {}, entityCountLessThan);
+    var names = std.ArrayList([]const u8).empty;
+    errdefer names.deinit(allocator); // the names borrow from `entities`
+    for (list.items[0..@min(10, list.items.len)]) |e| try names.append(allocator, e.name);
+    const joined = try std.mem.join(allocator, ", ", names.items);
+    // Success: nothing fallible follows; free both buffers explicitly so
+    // the errdefers (error path only) don't double-free.
+    names.deinit(allocator);
+    list.deinit(allocator);
+    return @as(?[]u8, joined);
+}
+
+/// One stat line: the label padded with spaces to `width`, then the value.
+fn statLine(allocator: Allocator, out: *std.ArrayList(u8), label: []const u8, width: usize, value: []const u8) Allocator.Error!void {
+    try out.appendSlice(allocator, label);
+    var pad = width - label.len;
+    while (pad > 0) : (pad -= 1) try out.append(allocator, ' ');
+    try out.appendSlice(allocator, value);
+    try out.append(allocator, '\n');
+}
+
+/// Renders the profile display body (spec/derived.md section 6): the span
+/// line (`{n} entries · {first-date} onward`, middle-dot U+00B7), a blank
+/// line, and the stat block — labels padded to the longest label plus two
+/// spaces, an empty stat an em dash (U+2014). An empty journal renders
+/// `0 entries` alone.
+pub fn renderProfileBody(
+    allocator: Allocator,
+    visible: *const view.Visible,
+    entities: []const Entity,
+) ProfileError![]u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+    var tag_names: ?[]u8 = null;
+    var place_names: ?[]u8 = null;
+    errdefer {
+        if (tag_names) |s| allocator.free(s);
+        if (place_names) |s| allocator.free(s);
+    }
+    const n: u64 = @intCast(visible.entries.len);
+    if (n == 0) {
+        try line(allocator, &out, "0 entries\n", .{});
+    } else {
+        const first = view.civilDate(firstDay(visible).?) catch return error.TimestampOutOfRange;
+        const best = (try bestMonth(allocator, visible)).?;
+        try line(allocator, &out, "{d} {s} \u{B7} {d:0>4}-{d:0>2}-{d:0>2} onward", .{
+            n, view.countNoun(n, "entry", "entries"), first.year, first.month, first.day,
+        });
+        const r = redactedCount(visible);
+        if (r > 0) try line(allocator, &out, " ({d} redacted)", .{r});
+        try out.append(allocator, '\n');
+        try out.append(allocator, '\n'); // blank line before the stat block
+        tag_names = try entityNames(allocator, entities, 0);
+        place_names = try entityNames(allocator, entities, 1);
+        // All three labels are always present, so the longest decides the
+        // column width.
+        const width = @max("most active".len, @max("tags".len, "people and places".len)) + 2;
+        var buf: [16]u8 = undefined;
+        const month = std.fmt.bufPrint(&buf, "{d:0>4}-{d:0>2}", .{
+            @as(u64, @intCast(@divTrunc(best.key, 12))), @as(u64, @intCast(@mod(best.key, 12))) + 1,
+        }) catch unreachable;
+        try statLine(allocator, &out, "most active", width, month);
+        try statLine(allocator, &out, "tags", width, tag_names orelse "\u{2014}");
+        try statLine(allocator, &out, "people and places", width, place_names orelse "\u{2014}");
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// Renders the profile artifact (spec/derived.md section 6): the machine
+/// header (format v2, the journal's seq range, head at build) followed by
+/// the display body.
+pub fn renderProfile(
+    allocator: Allocator,
+    visible: *const view.Visible,
+    entities: []const Entity,
+    record_count: u64,
+    head: [records.DigestLen]u8,
+) ProfileError![]u8 {
+    const head_hex = try hexLower(allocator, &head);
+    defer allocator.free(head_hex);
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+    if (record_count > 0) {
+        try line(allocator, &out, "# zephyr-profile: v2 range=seq 0..{d} head={s}\n", .{ record_count - 1, head_hex });
+    } else {
+        try line(allocator, &out, "# zephyr-profile: v2 range=none head={s}\n", .{head_hex});
+    }
+    const body = try renderProfileBody(allocator, visible, entities);
+    defer allocator.free(body);
+    try out.appendSlice(allocator, body);
+    return out.toOwnedSlice(allocator);
 }
 
 const MonthCount = struct { key: i64, count: u32 };
@@ -943,9 +1045,10 @@ test "digest: exact bytes for a fixed period" {
     defer allocator.free(got);
     const want = try allocator.print(
         "# zephyr-digest: period=2026-01-01..2026-01-01 range=seq 0..2 head={s}\n" ++
-            "3 entries (1 redacted)\n" ++
-            "tags: work 1\n" ++
-            "top words: the 2, auth 1, dog 1, fix 1, shipped 1, walked 1\n",
+            "2026-01-01 \u{2013} 2026-01-01 \u{B7} 3 entries (1 redacted)\n" ++
+            "\n" ++
+            "tags  work 1\n" ++
+            "top words  the 2, auth 1, dog 1, fix 1, shipped 1, walked 1\n",
         .{try hexLower(allocator, &HEAD)},
     );
     defer allocator.free(want);
@@ -964,7 +1067,8 @@ test "digest: empty period renders header and 0 entries" {
     const got = try renderDigest(allocator, &vis, range, HEAD);
     defer allocator.free(got);
     const want = try allocator.print(
-        "# zephyr-digest: period=2026-02-01..2026-02-01 range=seq 0..0 head={s}\n" ++ "0 entries\n",
+        "# zephyr-digest: period=2026-02-01..2026-02-01 range=seq 0..0 head={s}\n" ++
+            "2026-02-01 \u{2013} 2026-02-01 \u{B7} 0 entries\n",
         .{try hexLower(allocator, &HEAD)},
     );
     defer allocator.free(want);
@@ -984,11 +1088,12 @@ test "profile: exact bytes" {
     const got = try renderProfile(allocator, &vis, idx.entities, 4, HEAD);
     defer allocator.free(got);
     const want = try allocator.print(
-        "# zephyr-profile: v1 range=seq 0..3 head={s}\n" ++
-            "4 entries, 2026-01-01..2026-02-10 (1 redacted)\n" ++
-            "most active: 2026-01 (3 entries)\n" ++
-            "tags: Alice 1, work 1\n" ++
-            "people and places: New York 1\n",
+        "# zephyr-profile: v2 range=seq 0..3 head={s}\n" ++
+            "4 entries \u{B7} 2026-01-01 onward (1 redacted)\n" ++
+            "\n" ++
+            "most active        2026-01\n" ++
+            "tags               Alice, work\n" ++
+            "people and places  New York\n",
         .{try hexLower(allocator, &HEAD)},
     );
     defer allocator.free(want);
@@ -1007,7 +1112,7 @@ test "profile: empty journal" {
     const got = try renderProfile(allocator, &vis, &.{}, 0, genesis);
     defer allocator.free(got);
     const want = try allocator.print(
-        "# zephyr-profile: v1 range=none head={s}\n" ++ "0 entries\n",
+        "# zephyr-profile: v2 range=none head={s}\n" ++ "0 entries\n",
         .{try hexLower(allocator, &genesis)},
     );
     defer allocator.free(want);

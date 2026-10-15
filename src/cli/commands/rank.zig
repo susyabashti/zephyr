@@ -4,9 +4,12 @@
 //! artifact), or `hybrid` (RRF of the two, the default). Verify-first like
 //! every command.
 //!
-//! Defaults: hybrid, N = 10. A provenance line, then one line per hit:
+//! Defaults: hybrid, N = 10. One line per hit, in rank order, no other
+//! lines (spec/semantic.md section 7):
 //!
-//!   <rank>\t<seq>\t<score, 6 decimals>\t<view line>
+//!   <seq>  YYYY-MM-DD HH:MM  [tag]... text   (score, 3 decimals)
+//!
+//! On a TTY the score is dimmed.
 //!
 //! `vector` and `hybrid` need the fresh embedding artifact and the model;
 //! without them they report where to build it and fail with
@@ -86,7 +89,7 @@ pub fn run(
         // Keyword mode never touches the model or the artifact.
         const kw = try embed.keywordHits(arena, &visible, question);
         defer arena.free(kw);
-        return renderHits(arena, io, out, result, &by_seq, kw[0..@min(top, kw.len)]);
+        return renderHits(arena, io, style, out, &by_seq, kw[0..@min(top, kw.len)]);
     }
 
     // Vector and hybrid: the fresh artifact, or a clean, actionable error.
@@ -122,7 +125,7 @@ pub fn run(
     const vec = try embed.cosineTopN(arena, store.seqs, store.vectors, store.dim, qvec, store.seqs.len);
     defer arena.free(vec);
     if (mode == .vector) {
-        return renderHits(arena, io, out, result, &by_seq, vec[0..@min(top, vec.len)]);
+        return renderHits(arena, io, style, out, &by_seq, vec[0..@min(top, vec.len)]);
     }
 
     // Hybrid: RRF of the two ranked lists, then top-N.
@@ -134,29 +137,39 @@ pub fn run(
     defer arena.free(vec_seqs);
     const fused = try embed.rrfFusion(arena, kw_seqs, vec_seqs);
     defer arena.free(fused);
-    return renderHits(arena, io, out, result, &by_seq, fused[0..@min(top, fused.len)]);
+    return renderHits(arena, io, style, out, &by_seq, fused[0..@min(top, fused.len)]);
 }
 
-/// The provenance line (the pack's shape) and one line per hit; entries
+/// One line per hit, in rank order — the bare seq, the date and local
+/// time, the tag block, the text, and the score in parentheses, separated
+/// from the text by three spaces (spec/semantic.md section 7). Entries
 /// absent from the visible set (a stale artifact cannot happen here, but
-/// neither can a redaction after the build) are skipped, not padded.
+/// neither can a redaction after the build) are skipped, not padded. On a
+/// TTY the score is dimmed.
 fn renderHits(
     arena: Allocator,
     io: Io,
+    style: output.Style,
     out: File,
-    result: journal_mod.VerifyResult,
     by_seq: *const std.array_hash_map.Auto(u64, *const view.ViewEntry),
     hits: []const embed.RankHit,
 ) errors.RunError!void {
-    const head_hex = try output.hexOf(arena, &result.head);
-    defer arena.free(head_hex);
-    const last_seq: u64 = if (result.record_count == 0) 0 else result.record_count - 1;
-    try output.printLine(out, io, try arena.print("# zephyr: seq 0..{d} head={s}", .{ last_seq, head_hex }));
-    for (hits, 0..) |hit, i| {
+    var score_buf: [32]u8 = undefined;
+    for (hits) |hit| {
         const e = by_seq.get(hit.seq) orelse continue;
-        const line = try view.entryLine(arena, e.*);
-        defer arena.free(line);
-        try output.printLine(out, io, try arena.print("{d}\t{d}\t{d:.6}\t{s}", .{ i + 1, hit.seq, hit.score, line }));
+        const date = view.civilDate(e.day) catch return error.TimestampOutOfRange;
+        const time = view.timeString(e.ts_ms, e.tz_offset_min);
+        const tail = if (e.tags.len > 0) blk: {
+            var tags = std.ArrayList(u8).empty;
+            errdefer tags.deinit(arena);
+            for (e.tags) |tag| try tags.appendSlice(arena, try arena.print("[{s}]", .{tag}));
+            break :blk try arena.print("{s} {s}", .{ try tags.toOwnedSlice(arena), e.text });
+        } else e.text;
+        const score = std.fmt.bufPrint(&score_buf, "({d:.3})", .{hit.score}) catch unreachable;
+        try output.printLine(out, io, try arena.print(
+            "{d}  {d:0>4}-{d:0>2}-{d:0>2} {s}  {s}   {s}",
+            .{ hit.seq, date.year, date.month, date.day, time, tail, try style.dim(arena, score) },
+        ));
     }
 }
 

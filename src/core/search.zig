@@ -46,21 +46,31 @@ pub fn find(allocator: Allocator, visible: *const view.Visible, query: []const u
     return matches.toOwnedSlice(allocator);
 }
 
-/// Renders matches: a count line, then one line per match:
-/// `{seq:0>4}  YYYY-MM-DD HH:MM  [tag]... text`
+/// Renders matches: a count label, a blank line, then one line per match:
+/// `{seq}  YYYY-MM-DD HH:MM  [tag]... text` (bare seq, view line bytes).
 pub fn render(allocator: Allocator, matches: []const Match, query: []const u8) RenderError![]u8 {
-    return renderCapped(allocator, matches, query, std.math.maxInt(usize));
-}
-
-/// Same as `render`, but match lines stop once their combined size would
-/// exceed `max_bytes`; when cut, a truncation note is appended. The count
-/// line always shows the full match count.
-pub fn renderCapped(allocator: Allocator, matches: []const Match, query: []const u8, max_bytes: usize) RenderError![]u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
-    const plural = if (matches.len == 1) "" else "es";
-    try tryLine(allocator, &out, "# {d} match{s} for \"{s}\"", .{ matches.len, plural, query });
+    try tryLine(allocator, &out, "{d} {s} for \"{s}\"", .{
+        matches.len, view.countNoun(matches.len, "match", "matches"), query,
+    });
     try out.append(allocator, '\n');
+    if (matches.len > 0) {
+        try out.append(allocator, '\n');
+        const lines = try renderLines(allocator, matches, std.math.maxInt(usize));
+        defer allocator.free(lines);
+        try out.appendSlice(allocator, lines);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// Match lines only (no label): `{seq}  YYYY-MM-DD HH:MM  [tag]... text`,
+/// in the given order, stopping once their combined size would exceed
+/// `max_bytes`; when cut, a truncation note is appended. Callers that need
+/// a label or indentation wrap this (the ask pack, MCP search).
+pub fn renderLines(allocator: Allocator, matches: []const Match, max_bytes: usize) RenderError![]u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
     var scratch: [1 << 16]u8 = undefined;
     var used: usize = 0;
     var shown: usize = 0;
@@ -69,7 +79,7 @@ pub fn renderCapped(allocator: Allocator, matches: []const Match, query: []const
         var pos: usize = 0;
         const date = view.civilDate(m.day) catch return error.TimestampOutOfRange;
         const time = view.timeString(m.ts_ms, m.tz_offset_min);
-        pos += (std.fmt.bufPrint(scratch[pos..], "{d:0>4}  {d:0>4}-{d:0>2}-{d:0>2} {s}  ", .{
+        pos += (std.fmt.bufPrint(scratch[pos..], "{d}  {d:0>4}-{d:0>2}-{d:0>2} {s}  ", .{
             m.seq, date.year, date.month, date.day, time,
         }) catch unreachable).len;
         for (m.tags) |tag| {
@@ -86,7 +96,9 @@ pub fn renderCapped(allocator: Allocator, matches: []const Match, query: []const
         shown += 1;
     }
     if (shown < matches.len) {
-        try tryLine(allocator, &out, "... {d} more match(es) not shown", .{matches.len - shown});
+        try tryLine(allocator, &out, "... {d} more {s} not shown", .{
+            matches.len - shown, view.countNoun(matches.len - shown, "match", "matches"),
+        });
         try out.append(allocator, '\n');
     }
     return out.toOwnedSlice(allocator);
@@ -147,12 +159,12 @@ test "search: case-insensitive substring, viewable entries only" {
     // Rendered output for the "MILK" query (no tags on the match).
     const rendered = try render(allocator, milk, "MILK");
     defer allocator.free(rendered);
-    const want = "# 1 match for \"MILK\"\n0000  2026-01-01 00:00  bought milk\n";
+    const want = "1 match for \"MILK\"\n\n0  2026-01-01 00:00  bought milk\n";
     try std.testing.expectEqualStrings(want, rendered);
 
     const none = try render(allocator, no_match, "zebra");
     defer allocator.free(none);
-    try std.testing.expectEqualStrings("# 0 matches for \"zebra\"\n", none);
+    try std.testing.expectEqualStrings("0 matches for \"zebra\"\n", none);
 }
 
 // Local copies of the view test helpers (kept private there).

@@ -1,6 +1,7 @@
-//! zephyr verify — the full integrity check, plus the checkpoint anchor
-//! check (anchor-format section 6) and the OTS anchor checks
-//! (spec/ots-anchor.md section 6.1) when anchors exist.
+//! zephyr verify [--head] — the full integrity check, plus the checkpoint
+//! anchor check (anchor-format section 6) and the OTS anchor checks
+//! (spec/ots-anchor.md section 6.1) when anchors exist. `--head` appends
+//! the journal's head hash (first twelve hex digits) to the verdict line.
 
 const std = @import("std");
 const errors = @import("../errors.zig");
@@ -19,7 +20,16 @@ pub fn run(
     out: File,
     environ_map: *const std.process.Environ.Map,
     path: []const u8,
+    rest: []const []const u8,
 ) errors.RunError!void {
+    var show_head = false;
+    for (rest) |arg| {
+        if (std.mem.eql(u8, arg, "--head")) {
+            show_head = true;
+        } else {
+            return error.Usage;
+        }
+    }
     const journal = try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path);
     defer journal.close();
     const result = try journal.verify(arena);
@@ -28,20 +38,17 @@ pub fn run(
         if (result.record_count == 0) {
             try output.printLine(out, io, try arena.print("{s}verified · journal is empty", .{mark}));
         } else {
-            const head_hex = try output.hex12Of(arena, &result.head);
+            const head = if (show_head)
+                try arena.print(" · head {s}", .{try style.dim(arena, try output.hex12Of(arena, &result.head))})
+            else
+                "";
             const redacted = if (result.redacted_count > 0)
                 try arena.print(" · {d} redacted", .{result.redacted_count})
             else
                 "";
             try output.printLine(out, io, try arena.print(
-                "{s}verified · {d} {s} · head {s}{s}",
-                .{
-                    mark,
-                    result.record_count,
-                    output.countNoun(result.record_count, "record", "records"),
-                    try style.dim(arena, head_hex),
-                    redacted,
-                },
+                "{s}verified · {d} {s}{s}{s}",
+                .{ mark, result.record_count, output.countNoun(result.record_count, "record", "records"), head, redacted },
             ));
         }
 

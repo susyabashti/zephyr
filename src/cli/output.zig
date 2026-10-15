@@ -139,8 +139,9 @@ pub fn printUsage(file: File, io: Io) File.Writer.Error!void {
         \\  zephyr ots-export <segment> [--out <path>]
         \\                                   write the segment's 32-byte footer
         \\                                   head for external OTS tooling
-        \\  zephyr verify                     full integrity check (plus the
-        \\                                   anchor checks, when anchors exist)
+        \\\  zephyr verify [--head]            full integrity check (plus the
+        \\\                                   anchor checks, when anchors
+        \\\                                   exist); --head prints the head hash
         \\  zephyr export --for-ai [range]   LLM view of the log (refuses a
         \\                                   failing log); range: YYYY-MM-DD or
         \\                                   YYYY-MM-DD:YYYY-MM-DD
@@ -156,16 +157,6 @@ pub fn printUsage(file: File, io: Io) File.Writer.Error!void {
         \\
     ;
     return File.writeStreamingAll(file, io, usage);
-}
-
-pub fn hexOf(allocator: Allocator, hash: []const u8) Allocator.Error![]const u8 {
-    const digits = "0123456789abcdef";
-    const out = try allocator.alloc(u8, hash.len * 2);
-    for (hash, 0..) |b, i| {
-        out[i * 2] = digits[b >> 4];
-        out[i * 2 + 1] = digits[b & 0x0F];
-    }
-    return out;
 }
 
 /// The first six bytes as twelve lowercase hex digits (status lines only;

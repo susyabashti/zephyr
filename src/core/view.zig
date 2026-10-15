@@ -178,9 +178,9 @@ pub fn render(allocator: Allocator, headers: []const records.Header, payloads: [
 }
 
 /// Renders the view restricted to entries whose local day falls in `range`
-/// (start inclusive, end exclusive). The provenance line still describes the
-/// whole log; a non-empty log with no entries in range renders as just that
-/// line.
+/// (start inclusive, end exclusive). Day headers stand alone, entry lines
+/// carry the bare seq, and days are separated by a blank line; an empty
+/// journal or a range with no entries renders empty (spec section 9).
 pub fn renderRange(allocator: Allocator, headers: []const records.Header, payloads: []const []const u8, range: ?DayRange) RenderError![]u8 {
     const n = headers.len;
     if (n == 0) return allocator.alloc(u8, 0);
@@ -190,22 +190,23 @@ pub fn renderRange(allocator: Allocator, headers: []const records.Header, payloa
 
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
-    const last = headers[n - 1];
-    try tryLine(allocator, &out, "# zephyr: seq 0..{d} head=", .{last.seq});
-    try writeHexLower(allocator, &out, &last.record_hash);
-    try out.append(allocator, '\n');
-
+    var seq_buf: [20]u8 = undefined; // u64 decimal
     var current_day: ?i64 = null;
     for (visible.entries) |entry| {
         if (range) |r| {
             if (entry.day < r.start or entry.day >= r.end) continue;
         }
         if (current_day == null or current_day.? != entry.day) {
+            if (out.items.len > 0) try out.append(allocator, '\n'); // blank line between days
             const date = civilDate(entry.day) catch return error.TimestampOutOfRange;
-            try tryLine(allocator, &out, "# {d:0>4}-{d:0>2}-{d:0>2} {s}", .{ date.year, date.month, date.day, weekdayName(entry.day) });
+            try tryLine(allocator, &out, "{d:0>4}-{d:0>2}-{d:0>2} {s}", .{ date.year, date.month, date.day, weekdayName(entry.day) });
             try out.append(allocator, '\n');
             current_day = entry.day;
         }
+        const seq_digits = std.fmt.bufPrint(&seq_buf, "{d}", .{entry.seq}) catch unreachable;
+        try out.appendSlice(allocator, "  ");
+        try out.appendSlice(allocator, seq_digits);
+        try out.appendSlice(allocator, "  ");
         const line = try entryLine(allocator, entry);
         defer allocator.free(line);
         try out.appendSlice(allocator, line);
@@ -253,12 +254,10 @@ fn tryLine(allocator: Allocator, out: *std.ArrayList(u8), comptime fmt: []const 
     try out.appendSlice(allocator, line);
 }
 
-fn writeHexLower(allocator: Allocator, out: *std.ArrayList(u8), bytes: []const u8) Allocator.Error!void {
-    const digits = "0123456789abcdef";
-    for (bytes) |b| {
-        try out.append(allocator, digits[b >> 4]);
-        try out.append(allocator, digits[b & 0x0F]);
-    }
+/// The singular or plural form of a count noun ("record" / "records") —
+/// the core twin of the CLI's output.countNoun (core cannot import it).
+pub fn countNoun(count: u64, comptime singular: []const u8, comptime plural: []const u8) []const u8 {
+    return if (count == 1) singular else plural;
 }
 
 /// Local civil day (days since Unix epoch) of a timestamp under a fixed
@@ -387,11 +386,11 @@ test "local date rolls past midnight" {
     const entry = try makeEntry(allocator, "hello", 1_767_310_200_000, 120, &genesis);
 
     const out = try render(allocator, &.{entry.header}, &.{entry.payload});
-    const expected = try allocator.print("# zephyr: seq 0..0 head={s}\n# 2026-01-02 Fri\n01:30 hello\n", .{hexOf(&entry.header.record_hash)});
+    const expected = "2026-01-02 Fri\n  0  01:30 hello\n";
     try std.testing.expectEqualStrings(expected, out);
 }
 
-test "renderRange filters by local day and keeps the provenance line" {
+test "renderRange filters by local day" {
     const gpa = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -415,19 +414,15 @@ test "renderRange filters by local day and keeps the provenance line" {
     // Only the entry whose local day is 2026-01-16, even though its UTC date
     // is 2026-01-15.
     const got = try renderRange(allocator, &headers, &payloads, .{ .start = day16, .end = day16 + 1 });
-    const head_hex = hexOf(&e1.header.record_hash);
-    const want = try allocator.print("# zephyr: seq 0..1 head={s}\n# 2026-01-16 Fri\n01:45 before midnight\n", .{head_hex});
-    try std.testing.expectEqualStrings(want, got);
+    try std.testing.expectEqualStrings("2026-01-16 Fri\n  0  01:45 before midnight\n", got);
 
-    // The empty range renders as just the provenance line.
+    // A range with no entries renders empty.
     const empty = try renderRange(allocator, &headers, &payloads, .{ .start = day17, .end = day17 + 1 });
-    const want_empty = try allocator.print("# zephyr: seq 0..1 head={s}\n", .{head_hex});
-    try std.testing.expectEqualStrings(want_empty, empty);
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
 
     // The entry at exactly local midnight belongs to 2026-01-18, not 01-17.
     const at_midnight = try renderRange(allocator, &headers, &payloads, .{ .start = day18, .end = day18 + 1 });
-    const want_midnight = try allocator.print("# zephyr: seq 0..1 head={s}\n# 2026-01-18 Sun\n00:00 at midnight\n", .{head_hex});
-    try std.testing.expectEqualStrings(want_midnight, at_midnight);
+    try std.testing.expectEqualStrings("2026-01-18 Sun\n  1  00:00 at midnight\n", at_midnight);
 }
 
 test "dateToCivilDay and weekStart" {
@@ -512,43 +507,22 @@ fn recompute(header: *records.Header, prev: *const [records.DigestLen]u8) [recor
     return records.computeRecordHash(&prefix, prev);
 }
 
-test "provenance line uses final record hash" {
+test "render: day headers, bare seqs, and the blank line between days" {
     const gpa = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const salt = [records.SaltLen]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32 };
-    const payload = records.Payload{ .salt = salt, .text = "hello", .tags = &.{} };
-    var payload_bytes: [records.payloadSize("hello", &.{})]u8 = undefined;
-    records.encodePayload(&payload, &payload_bytes);
-    var header = records.Header{
-        .version = records.FormatVersion,
-        .record_type = .entry,
-        .seq = 0,
-        .timestamp_ms = 1_767_225_600_000, // 2026-01-01T00:00:00Z
-        .tz_offset_min = 0,
-        .flags = 0,
-        .target_seq = 0,
-        .commitment = records.computeCommitment(&payload_bytes),
-        .record_hash = undefined,
-    };
-    var prefix: [records.HeaderPrefixLen]u8 = undefined;
-    header.prefixBytes(&prefix);
+    // Two entries on consecutive days, chained from genesis, UTC.
     const genesis = records.Header.GenesisHash;
-    header.record_hash = records.computeRecordHash(&prefix, &genesis);
+    const e0 = try makeEntry(allocator, "hello", 1_767_225_600_000, 0, &genesis); // 2026-01-01T00:00:00Z
+    var e1 = try makeEntry(allocator, "world", 1_767_317_400_000, 0, &e0.header.record_hash); // 2026-01-02T01:30:00Z
+    e1.header.seq = 1;
+    e1.header.record_hash = recompute(&e1.header, &e0.header.record_hash);
+    const headers = [_]records.Header{ e0.header, e1.header };
+    const payloads = [_][]const u8{ e0.payload, e1.payload };
 
-    const out = try render(allocator, &.{header}, &.{&payload_bytes});
-    const expected = try allocator.print("# zephyr: seq 0..0 head={s}\n# 2026-01-01 Thu\n00:00 hello\n", .{hexOf(&header.record_hash)});
-    try std.testing.expectEqualStrings(expected, out);
-}
-
-fn hexOf(bytes: []const u8) [64]u8 {
-    const digits = "0123456789abcdef";
-    var out: [64]u8 = undefined;
-    for (bytes, 0..) |b, i| {
-        out[i * 2] = digits[b >> 4];
-        out[i * 2 + 1] = digits[b & 0x0F];
-    }
-    return out;
+    const out = try render(allocator, &headers, &payloads);
+    const want = "2026-01-01 Thu\n  0  00:00 hello\n\n2026-01-02 Fri\n  1  01:30 world\n";
+    try std.testing.expectEqualStrings(want, out);
 }

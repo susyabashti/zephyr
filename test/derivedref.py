@@ -11,8 +11,8 @@ Checks:
   - index.zdi is byte-identical to the Python ZDI1 encoding (magic,
     version byte, head, words, entities, SHA-256 footer);
   - profile.md is byte-identical to the Python profile render;
-  - the ask pack is byte-identical to the Python pack (provenance line,
-    question, profile, notes, period digest, keyword matches, footer);
+  - the ask pack is byte-identical to the Python pack (question, profile,
+    notes, period digest, keyword matches, footer);
   - recap serves the Python digest render;
   - rebuild determinism: delete derived/ and profile.md, re-read, and
     the pack and index are byte-identical;
@@ -51,7 +51,6 @@ DAY0 = 20454             # civil day of 2026-01-01
 MAGIC = b"ZDI1"
 INDEX_VERSION = 1
 MAX_NAME_LEN = 255
-PROFILE_HEADER = "# zephyr-profile: v1 "
 INDEX_FILE = "derived/index.zdi"
 PROFILE_FILE = "profile.md"
 NOTES_FILE = "notes.md"
@@ -369,7 +368,7 @@ def fmt_date(day):
     return f"{d.year:04d}-{d.month:02d}-{d.day:02d}"
 
 
-def render_digest(ves, start, end, head):
+def render_digest_body(ves, start, end):
     in_range = [v for v in ves if start <= v["day"] < end]
     n = len(in_range)
     red = sum(1 for v in in_range if v["redacted"])
@@ -383,54 +382,73 @@ def render_digest(ves, start, end, head):
             w = v["text"][a:b]
             if len(w) >= 2:
                 wc[w.lower()] = wc.get(w.lower(), 0) + 1
-    if n == 0:
-        seq_range = "0..0"
-    else:
-        seqs = [v["seq"] for v in in_range]
-        seq_range = f"{min(seqs)}..{max(seqs)}"
-    out = (f"# zephyr-digest: period={fmt_date(start)}..{fmt_date(end - 1)} "
-           f"range=seq {seq_range} head={head.hex()}\n")
-    if n == 0:
-        out += "0 entries\n"
-    else:
-        out += f"{n} entries ({red} redacted)\n" if red else f"{n} entries\n"
+    noun = "entry" if n == 1 else "entries"
+    out = f"{fmt_date(start)} \u2013 {fmt_date(end - 1)} \u00b7 {n} {noun}"
+    if red:
+        out += f" ({red} redacted)"
+    out += "\n"
+    if n > 0:
+        lines = []
         if tags:
             items = sorted(tags.items(), key=lambda kv: (-kv[1], kv[0]))
-            out += "tags: " + ", ".join(f"{t} {c}" for t, c in items) + "\n"
+            lines.append("tags  " + ", ".join(f"{t} {c}" for t, c in items))
         if wc:
-            items = sorted(wc.items(), key=lambda kv: (-kv[1], kv[0]))[:20]
-            out += "top words: " + ", ".join(f"{t} {c}" for t, c in items) + "\n"
+            items = sorted(wc.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+            lines.append("top words  " + ", ".join(f"{t} {c}" for t, c in items))
+        if lines:
+            out += "\n" + "\n".join(lines) + "\n"
     return out
 
 
-def render_profile(ves, entities, record_count, head):
+def render_digest(ves, start, end, head):
+    in_range = [v for v in ves if start <= v["day"] < end]
+    if in_range:
+        seqs = [v["seq"] for v in in_range]
+        seq_range = f"{min(seqs)}..{max(seqs)}"
+    else:
+        seq_range = "0..0"
+    header = (f"# zephyr-digest: period={fmt_date(start)}..{fmt_date(end - 1)} "
+              f"range=seq {seq_range} head={head.hex()}\n")
+    return header + render_digest_body(ves, start, end)
+
+
+def render_profile_body(ves, entities):
     n = len(ves)
     if n == 0:
-        rng = "none" if record_count == 0 else f"seq 0..{record_count - 1}"
-        return f"# zephyr-profile: v1 range={rng} head={head.hex()}\n0 entries\n"
+        return "0 entries\n"
     red = sum(1 for v in ves if v["redacted"])
     months = {}
     for v in ves:
         d = civil_date(v["day"])
         key = d.year * 12 + (d.month - 1)
         months[key] = months.get(key, 0) + 1
-    best_key, best_count = min(months.items(), key=lambda kv: (-kv[1], kv[0]))
+    best_key, _ = min(months.items(), key=lambda kv: (-kv[1], kv[0]))
     by, bm = divmod(best_key, 12)
     first = fmt_date(min(v["day"] for v in ves))
-    last = fmt_date(max(v["day"] for v in ves))
-    out = f"# zephyr-profile: v1 range=seq 0..{record_count - 1} head={head.hex()}\n"
-    out += f"{n} entries, {first}..{last}"
+    noun = "entry" if n == 1 else "entries"
+    out = f"{n} {noun} \u00b7 {first} onward"
     if red:
         out += f" ({red} redacted)"
-    out += "\n"
-    out += f"most active: {by:04d}-{bm + 1:02d} ({best_count} entries)\n"
-    for kind, label in ((0, "tags"), (1, "people and places")):
+    out += "\n\n"
+
+    def names(kind):
         items = [e for e in entities if e["kind"] == kind]
-        if not items:
-            continue
         items.sort(key=lambda e: (-e["count"], e["name"]))
-        out += label + ": " + ", ".join(f"{e['name']} {e['count']}" for e in items[:10]) + "\n"
+        return ", ".join(e["name"] for e in items[:10]) or "\u2014"
+
+    # Labels padded to the longest label plus two spaces.
+    labels = ["most active", "tags", "people and places"]
+    values = [f"{by:04d}-{bm + 1:02d}", names(0), names(1)]
+    width = max(len(l) for l in labels) + 2
+    for label, value in zip(labels, values):
+        out += label.ljust(width) + value + "\n"
     return out
+
+
+def render_profile(ves, entities, record_count, head):
+    rng = "none" if record_count == 0 else f"seq 0..{record_count - 1}"
+    header = f"# zephyr-profile: v2 range={rng} head={head.hex()}\n"
+    return header + render_profile_body(ves, entities)
 
 
 def question_words(question):
@@ -462,14 +480,12 @@ def retrieve(ves, words, question, rng):
     return out
 
 
-def render_matches(matches, question):
-    plural = "" if len(matches) == 1 else "es"
-    out = f"# {len(matches)} match{plural} for \"{question}\"\n"
+def render_match_lines(matches):
+    out = ""
     used = shown = 0
-    body = ""
     for m in matches:
         secs = (m["ts_ms"] + m["tz"] * 60_000) // 1000
-        line = (f"{m['seq']:04d}  {fmt_date(m['day'])} "
+        line = (f"{m['seq']}  {fmt_date(m['day'])} "
                 f"{(secs % 86_400) // 3600:02d}:{(secs % 3600) // 60:02d}  ")
         for t in m["tags"]:
             line += f"[{t}]"
@@ -478,27 +494,39 @@ def render_matches(matches, question):
         line += m["text"] + "\n"
         if shown > 0 and used + len(line) > PACK_MATCH_CAP:
             break
-        body += line
+        out += line
         used += len(line)
         shown += 1
     if shown < len(matches):
-        body += f"... {len(matches) - shown} more match(es) not shown\n"
-    return out + body
+        more = len(matches) - shown
+        noun = "match" if more == 1 else "matches"
+        out += f"... {more} more {noun} not shown\n"
+    return out
 
 
-def render_pack(head, record_count, ves, question, rng, notes=None):
-    prov = f"# zephyr: seq 0..{record_count - 1} head={head.hex()}\n"
-    parts = [prov, f"# question: {question}\n"]
-    parts.append(render_profile(ves, build_entities(ves), record_count, head))
+def render_matches(matches, question):
+    noun = "match" if len(matches) == 1 else "matches"
+    out = f'{len(matches)} {noun} for "{question}"'
+    if matches:
+        out += "\n\n" + render_match_lines(matches)
+    return out + "\n"
+
+
+def indent2(s):
+    return "\n".join(("  " + line) if line else "" for line in s.split("\n"))
+
+
+def render_pack(record_count, ves, question, rng, notes=None, label="Period"):
+    parts = [f"Question: {question}\n", "\n",
+             "Your profile\n", indent2(render_profile_body(ves, build_entities(ves)))]
     if notes is not None:
         sep = "" if notes.endswith("\n") else "\n"
-        parts.append(f"# notes\n{notes}{sep}")
-    if rng:
-        parts.append(render_digest(ves, rng[0], rng[1], head))
+        parts.append(f"\nNotes\n{indent2(notes + sep)}")
+    parts.append(f"\n{label}\n" + indent2(render_digest_body(ves, rng[0], rng[1])))
     matches = retrieve(ves, build_words(ves), question, rng)
     if matches:
-        parts.append(render_matches(matches, question))
-    parts.append(FOOTER)
+        parts.append(f"\nMatching entries\n{indent2(render_match_lines(matches))}")
+    parts.append("\n" + FOOTER)
     return "".join(parts)
 
 
@@ -554,7 +582,7 @@ def run_gate(binary):
         # ask: the full pack, byte-for-byte.
         got = run_cli(journal_dir, "ask", "2026-01-01:2026-01-05",
                       "anything", "about", "auth", "or", "Alice?")
-        expect_bytes(got, render_pack(head, record_count, ves, question, rng).encode(),
+        expect_bytes(got, render_pack(record_count, ves, question, rng).encode(),
                      "ask pack")
 
         # index.zdi: the binary format, byte-for-byte.
@@ -568,26 +596,26 @@ def run_gate(binary):
                      render_profile(ves, build_entities(ves), record_count, head).encode(),
                      "profile.md")
 
-        # recap: the digest artifact for an explicit period.
+        # recap: the digest display body for an explicit period (the stored
+        # artifact keeps its machine header; the display never shows it).
         got = run_cli(journal_dir, "recap", "2026-01-01..2026-01-01")
-        expect_bytes(got, render_digest(ves, DAY0, DAY0 + 1, head).encode(),
+        expect_bytes(got, render_digest_body(ves, DAY0, DAY0 + 1).encode(),
                      "recap")
 
-        # profile: derived profile plus the one-line no-notes note.
+        # profile: without notes.md the body stands at column 0.
         got = run_cli(journal_dir, "profile")
         expect_bytes(got,
-                     (render_profile(ves, build_entities(ves), record_count, head)
-                      + "# notes\n(no notes)").encode(),
+                     render_profile_body(ves, build_entities(ves)).encode(),
                      "profile command")
 
-        # ---- notes: user-owned, presented under a heading ------------
+        # ---- notes: user-owned, presented first under `notes` --------
         notes = "I live in Berlin.\n"
         with open(os.path.join(journal_dir, NOTES_FILE), "w", encoding="utf-8") as f:
             f.write(notes)
         got = run_cli(journal_dir, "profile")
         expect_bytes(got,
-                     (render_profile(ves, build_entities(ves), record_count, head)
-                      + f"# notes\n{notes}").encode(),
+                     ("notes\n" + indent2(notes) + "\nabout you\n"
+                      + indent2(render_profile_body(ves, build_entities(ves)))).encode(),
                      "profile command with notes")
         expect(read(os.path.join(journal_dir, NOTES_FILE)) == notes.encode(),
                "notes.md was rewritten by zephyr profile")
@@ -599,7 +627,7 @@ def run_gate(binary):
         os.remove(os.path.join(journal_dir, PROFILE_FILE))
         got = run_cli(journal_dir, "ask", "2026-01-01:2026-01-05",
                       "anything", "about", "auth", "or", "Alice?")
-        expect_bytes(got, render_pack(head, record_count, ves, question, rng,
+        expect_bytes(got, render_pack(record_count, ves, question, rng,
                                       notes).encode(),
                      "ask pack after rebuild")
         expect_bytes(read(os.path.join(journal_dir, INDEX_FILE)), index_before,
@@ -631,7 +659,7 @@ def run_gate(binary):
         expect(count2 == len(recs), f"record count: disk {len(recs)} vs verify {count2}")
         got = run_cli(journal_dir, "ask", "2026-01-01:2026-01-05",
                       "anything", "about", "auth", "or", "Alice?")
-        expect_bytes(got, render_pack(head2, count2, ves, question, rng,
+        expect_bytes(got, render_pack(count2, ves, question, rng,
                                       notes).encode(),
                      "ask pack after append (staleness)")
         expect(read(os.path.join(journal_dir, NOTES_FILE)) == notes.encode(),
