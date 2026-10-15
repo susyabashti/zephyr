@@ -74,7 +74,7 @@ deterministic fake.
 | `src/cli/commands/derived.zig` | `zephyr derived status\|rebuild` — inspect/force-rebuild derived artifacts; `--embeddings` loads the model |
 | `src/cli/commands/edit.zig` | `zephyr edit` — amend an entry (tags carried over unless `-t`) |
 | `src/cli/commands/export.zig` | `zephyr export --for-ai [range]` — the LLM view of the log; refuses a failing log |
-| `src/cli/commands/log.zig` | `zephyr log` (+ the bare-word quick log) — prints `logged seq N` |
+| `src/cli/commands/log.zig` | `zephyr log` (+ the bare-word quick log) — prints `✓ logged seq N` |
 | `src/cli/commands/mcp.zig` | `zephyr mcp` — run the read-only MCP server over stdio |
 | `src/cli/commands/model.zig` | `zephyr model fetch\|status` — manage the pinned model (works in `--no-embed` builds) |
 | `src/cli/commands/ots-export.zig` | `zephyr ots-export` — write a segment's footer head for external OTS tooling |

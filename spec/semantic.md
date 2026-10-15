@@ -175,14 +175,13 @@ tail    32     sha256 of everything above
 - `zephyr derived rebuild --embeddings` — builds `embed.zde`: loads the
   model once, embeds visible entries in seq order, writes atomically.
   Without the flag, behavior is unchanged and no model is loaded.
-- `zephyr derived rebuild --embeddings` also prints
-  `embeddings: <n> entries, <b> bytes/entry (derived/embed.zde)` after the
-  base rebuild line.
+- `zephyr derived rebuild --embeddings` also prints `✓ embedded · <n>
+  entries` after the base rebuild line (`✓ rebuilt · <w> words · <e>
+  entities`).
 - `zephyr derived status` — gains a line:
-  `embed  head=<hex12>  dim=<d>  model=<hex12>  engine=<hex12>
-  records=<n>  <fresh|stale|corrupt|missing>`; an artifact that does not
-  decode (or is absent) renders `embed  head=-  <corrupt|missing>`.
-  `<hex12>` is the first six digest bytes, lowercase.
+  `embed  <fresh|stale> · <n> records · dim <d>`; an artifact that does not
+  decode (or is absent) renders `embed  <corrupt|missing>`. Plain text when
+  piped; colored on a TTY.
 - Usage text and `RunError` updated accordingly.
 
 ## 8. Gate

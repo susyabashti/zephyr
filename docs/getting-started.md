@@ -37,10 +37,10 @@ reference gates and for OpenTimestamps tooling.
 
 ```sh
 zephyr "fixed the auth bug, finally"
-# logged seq 0
+# ✓ logged seq 0
 
 zephyr log -t work "shipped v2 to client"
-# logged seq 1
+# ✓ logged seq 1
 
 zephyr today
 # # zephyr: seq 0..1 head=…
@@ -66,7 +66,7 @@ zephyr search "auth"
 
 ```sh
 zephyr verify
-# ok: 2 record(s), head …
+# ✓ verified · 2 records · head …
 ```
 
 `verify` re-reads every segment, re-walks the hash chain, and reports the
@@ -85,11 +85,14 @@ pin in `src/embed/model.zig`, and installs it to
 
 ```sh
 zephyr derived rebuild --embeddings
-# rebuilt: 42 words, 3 entities (digests regenerate on demand)
-# model: downloading embeddinggemma-300M-Q8_0.gguf (313 MiB) from huggingface.co
-# model: ok (sha256 verified) at ~/.zephyr/models/embeddinggemma-300M-Q8_0.gguf
-# embeddings: 17 entries, 3072 bytes/entry (derived/embed.zde)
+# ✓ rebuilt · 42 words · 3 entities
+# downloading embeddinggemma-300M-Q8_0.gguf (313 MiB) from huggingface.co
+# ✓ model ok (sha256 verified) · ~/.zephyr/models/embeddinggemma-300M-Q8_0.gguf
+# ✓ embedded · 17 entries
 ```
+
+The download lines appear only on the first run; digests regenerate on
+demand, so they are not listed in the output.
 
 Prefer to manage the model yourself? It is a normal command:
 
@@ -127,7 +130,7 @@ over embeddings.
 
 ```sh
 zephyr checkpoint
-# checkpoint seq 2 (key /path/zephyr-key, anchor anchors/checkpoint-2.zpa)
+# ✓ checkpoint seq 2 → anchors/checkpoint-2.zpa
 ```
 
 On first use this creates a 32-byte Ed25519 seed at
@@ -142,11 +145,11 @@ segment. Segments seal when the month rolls over (the current, still-open
 month cannot be stamped):
 
 ```sh
-zephyr ots-export 2026-09            # writes ./2026-09.head (32 bytes)
+zephyr ots-export 2026-09.zph        # writes ./2026-09.zph.head (32 bytes)
 # …anchor that file with OpenTimestamps tooling (python-ots, opensketch):
 #   it produces a standard v1 detached proof with a sha256 file hash
-zephyr ots-stamp 2026-09 --proof 2026-09.ots
-# ots-stamp: ok (anchors/ots-2026-09.ots, attested at bitcoin height …)
+zephyr ots-stamp 2026-09.zph --proof 2026-09.ots
+# ✓ ots · anchors/ots-2026-09.ots · bitcoin height …
 ```
 
 `verify` re-checks every stored proof on every run, so a segment edited

@@ -10,16 +10,16 @@ describes the behavior a user or an AI will observe.
 
 - Creates the journal on first use; no setup, no required fields.
 - Verifies the existing journal before appending — a broken journal is
-  refused, never extended (`FAIL: …` line on stderr, exit 1).
+  refused, never extended (`✗ …` line on stderr, exit 1).
 - The wall clock supplies UTC milliseconds plus the local timezone offset;
   text is NFC-normalized UTF-8; tags are optional.
-- Prints `logged seq N`, where N is the new record's sequence number.
+- Prints `✓ logged seq N`, where N is the new record's sequence number.
 - A bare word is a quick log: `zephyr fix the bug` logs `fix the bug`.
 
 **Amend** — `zephyr edit <seq> [-t TAG]... "text"`
 
 - Appends an *amendment* record pointing at the target; the original stays
-  in the log. Prints `amended seq N (new seq M)`.
+  in the log. Prints `✓ amended seq N → M` (M is the amendment's seq).
 - The entry's tags are carried over unless `-t` is given, so a plain text
   edit never silently drops tags.
 
@@ -27,7 +27,7 @@ describes the behavior a user or an AI will observe.
 
 - Appends a *tombstone*; the entry disappears from views, search, exports,
   and the MCP server, but its bytes remain in the file. Prints
-  `tombstoned seq N (new seq M)`.
+  `✓ hidden seq N → M` (M is the tombstone's seq).
 
 **Redact** — `zephyr redact <seq> [--yes]`
 
@@ -38,7 +38,7 @@ describes the behavior a user or an AI will observe.
 - Prompts once on stdout — `redact seq N? … Proceed? [y/N]` — and reads one
   line from stdin; anything other than `y`/`Y` prints `aborted` and does
   nothing. `--yes` skips the prompt.
-- Prints `redacted seq N (redaction seq M)`. Redacted entries show as
+- Prints `✓ redacted seq N`. Redacted entries show as
   `[redacted]` in views; `verify` reports the count, not a failure.
 
 ## Views and search
@@ -73,22 +73,23 @@ describes the behavior a user or an AI will observe.
 
 - Re-reads every segment, re-walks the hash chain, checks sealed footers,
   and reports the exact failing record/field/detail on stderr (exit 1).
-- On success: `ok: N record(s), head HEX` (plus `, K redacted` when there
-  are redactions).
+- On success: `✓ verified · N record(s) · head HEX` (12-hex prefix, plus
+  `· K redacted` when there are redactions); an empty journal prints
+  `✓ verified · journal is empty`.
 - If a checkpoint anchor exists, it is checked: the anchor must be a valid
   190-byte signed artifact whose checkpoint is present and whose head/count
   the current log must at least match (truncation and record removal fail
-  it). Prints `anchor: ok (checkpoint seq N, head HEX)`.
+  it). Prints `✓ anchor · checkpoint seq N`.
 - Every stored OpenTimestamps proof is re-verified against its segment's
-  footer head. Prints one `ots: ok (ots-YYYY-MM.ots, attested at …)` line
-  per proof. Any failure exits 1.
+  footer head. Prints one `✓ ots · anchors/ots-YYYY-MM.ots · <attestation
+  summary>` line per proof. Any failure exits 1.
 
 **Checkpoint** — `zephyr checkpoint [--key PATH]`
 
 - Appends a `checkpoint` record, re-verifies, and writes a 190-byte
   Ed25519-signed anchor `anchors/checkpoint-<seq>.zpa` binding the log's
   head hash and record count. Prints
-  `checkpoint seq N (key PATH, anchor anchors/checkpoint-N.zpa)`.
+  `✓ checkpoint seq N → anchors/checkpoint-N.zpa`.
 - Key resolution: `--key PATH` > `$ZEPHYR_KEY` > `<journal>/zephyr-key`.
   The default key is a 32-byte CSPRNG seed created 0600 on first use; the
   key pair is derived deterministically from it, so the key file is the
@@ -100,13 +101,13 @@ describes the behavior a user or an AI will observe.
 - Segments seal when the next month's segment is first written; only sealed
   segments can be stamped.
 - `ots-export` writes the segment's 32-byte footer head (default
-  `<cwd>/<segment>.head`): `ots-export: wrote PATH (head HEX); anchor this
-  file to get an .ots proof`.
+  `<cwd>/<segment>.head`): `✓ wrote PATH · head HEX` (12-hex prefix), plus
+  the hint line `anchor this file to get an .ots proof`.
 - `ots-stamp` takes a standard OpenTimestamps v1 detached proof (sha256
   over the head), verifies it, stores it as `anchors/ots-<YYYY-MM>.ots`,
-  and prints `ots-stamp: ok (anchors/ots-YYYY-MM.ots, attested at bitcoin
-  height N)` (or the pending-calendar URI). A bad proof is rejected with a
-  specific reason (exit 1).
+  and prints `✓ ots · anchors/ots-YYYY-MM.ots · <attestation summary>`
+  (e.g. `bitcoin height N`, or the pending-calendar URI). A bad proof is
+  rejected with a specific reason (exit 1).
 - `verify` re-checks every stored proof on every run, so a segment edited
   after stamping is caught.
 
@@ -152,11 +153,11 @@ The profile is `profile.md` (`# zephyr-profile: v1 range=… head=…`); it is
 rebuilt from the log when stale. `notes.md` is the user's own file and is
 never rewritten by zephyr.
 
-**Status** — `zephyr derived status` lists each artifact — `index`,
-`profile`, `embed`, and every stored digest — with its state
-(`fresh`/`stale`/`corrupt`/`missing`) and the head it is bound to. The
-embedding line additionally shows the dimension, the model hash, and the
-engine id.
+**Status** — `zephyr derived status` prints one line per artifact —
+`index`, `profile`, `embed`, and every stored digest (`digest
+<start>..<end>`) — with its state (`fresh`/`stale`/`corrupt`/`missing`)
+and, when known, the record count; the embedding line also shows the
+vector dimension. Colors on a TTY; plain when piped.
 
 **Rebuild** — `zephyr derived rebuild [--embeddings]` force-rewrites the
 index (`derived/index.zdi`) and the profile; digests regenerate on demand.
@@ -195,21 +196,23 @@ the current week, Monday–Sunday).
   checked against the pinned size and sha256; only then is it renamed into
   place. Any failure removes the temporary file, so an interrupted download
   never leaves a half file at the model path.
-- A file that already matches the pin is left alone (one `model: ok …` line);
-  a wrong-size or corrupt file is replaced. `--force` re-downloads even when
-  verified. Progress: `model: downloading embeddinggemma-300M-Q8_0.gguf
-  (313 MiB) from huggingface.co`, then `model: ok (sha256 verified) at PATH`.
+- A file that already matches the pin is left alone (one `✓ model ok …`
+  line); a wrong-size or corrupt file is replaced. `--force` re-downloads
+  even when verified. Progress:
+  `downloading embeddinggemma-300M-Q8_0.gguf (313 MiB) from
+  huggingface.co`, then `✓ model ok (sha256 verified) · PATH`.
 - Honors the standard proxy environment variables (`https_proxy` and
   friends). Works in `--no-embed` builds too (pre-fetch for a later full
   build).
 
 **Status** — `zephyr model status`
 
-- Prints the resolved path (`$ZEPHYR_EMBED_MODEL` wins over the default;
-  a relative env value is resolved against the cwd), a `source:` line when
-  the env variable is set, and one of: `status: ok (N bytes, sha256
-  verified)`, `status: invalid (N bytes, expected M) (run: zephyr model
-  fetch)`, or `status: missing (run: zephyr model fetch)`.
+- One of: `✓ model ok (sha256 verified) · PATH`, `✗ model invalid (N
+  bytes, expected M) (run: zephyr model fetch) · PATH`, or `✗ model
+  missing (run: zephyr model fetch) · PATH`. The resolved path is shown
+  dimmed on a TTY (`$ZEPHYR_EMBED_MODEL` wins over the default; a relative
+  env value is resolved against the cwd), with a `source:` line when the
+  env variable is set.
 
 **Auto-fetch**
 
@@ -262,7 +265,7 @@ the current week, Monday–Sunday).
 
 ```mermaid
 flowchart TD
-    A["1 · zephyr 'fixed the auth bug'"] --> B["logged seq 42 — the journal is created on first use"]
+    A["1 · zephyr 'fixed the auth bug'"] --> B["✓ logged seq 42 — the journal is created on first use"]
     B --> C["2 · zephyr today / week / on 2026-10-14"]
     C --> D["3 · zephyr search 'auth'"]
     D --> E["4 · zephyr edit 42 / rm 42 / redact 42 — corrections are new, visible records"]
