@@ -47,10 +47,10 @@ describes the behavior a user or an AI will observe.
 
 - Civil days are computed in the journal's local timezone; `week` is the
   ISO Monday–Sunday week containing today.
-- Rendered by the deterministic view renderer: a provenance line
-  (`# zephyr: seq 0..N head=HEX`), one date header per day
-  (`# YYYY-MM-DD Mon`), then entry lines `HH:MM [tag] text` — with `(edited)`
-  marking an amended entry and `[redacted]` marking a redacted one.
+- Rendered by the deterministic view renderer: one date header per day
+  (`YYYY-MM-DD Ddd`), then entry lines `  SEQ  HH:MM [(edited)] [tag]… text`
+  — with `(edited)` marking an amended entry and `[redacted]` marking a
+  redacted one. A blank line separates days.
 - Latest amendment text is what's shown; tombstoned entries are omitted;
   private entries never appear.
 
@@ -59,13 +59,15 @@ describes the behavior a user or an AI will observe.
 - Case-insensitive substring match over the *effective* text — what the
   view shows — of visible entries (non-private, non-tombstoned,
   non-redacted). Superseded original text of amended entries is not
-  searched. Results are in view order, each on one view line.
+  searched.
+- Results: a `N match(es) for "query"` line, then one line per hit —
+  `SEQ  YYYY-MM-DD HH:MM  [tag]… text`, in view order.
 
 **Export** — `zephyr export --for-ai [YYYY-MM-DD[:YYYY-MM-DD]]`
 
 - The LLM view of the whole log (or an inclusive range). Refuses to render
   a failing log (reports the exact position, exit 1). On the gate profile
-  it measures 8.80 tokens/entry against a ≤ 9.0 target.
+  it measures 10.77 tokens/entry against a ≤ 11.0 target.
 
 ## Trust layer
 
@@ -73,8 +75,9 @@ describes the behavior a user or an AI will observe.
 
 - Re-reads every segment, re-walks the hash chain, checks sealed footers,
   and reports the exact failing record/field/detail on stderr (exit 1).
-- On success: `✓ verified · N record(s) · head HEX` (12-hex prefix, plus
-  `· K redacted` when there are redactions); an empty journal prints
+- On success: `✓ verified · N record(s)` (plus `· head HEX` — 12-hex
+  prefix, dimmed on a TTY — only with `--head`, and `· K redacted` when
+  there are redactions); an empty journal prints
   `✓ verified · journal is empty`.
 - If a checkpoint anchor exists, it is checked: the anchor must be a valid
   190-byte signed artifact whose checkpoint is present and whose head/count
@@ -121,13 +124,15 @@ describes the behavior a user or an AI will observe.
   to the current week), `get_profile`, `verify_status`, `get_context`
   (question + optional range — the same pack `ask` prints), and `add_entry`.
 - Verify before trust: a failing journal is reported as an error result
-  (`isError=true`), never served silently. Every successful result begins
-  with the provenance line of the verified log state it was read from.
+  (`isError=true`), never served silently. Results are the same clean,
+  human-readable text the CLI prints — the log state they came from is
+  bound in the on-disk artifacts, not in the text.
 
 **Context pack** — `zephyr ask [from:to] <question...>`
 
-- Deterministic and offline: provenance, the question, the derived
-  profile, `notes.md`, the period digest, and the matching entries.
+- Deterministic and offline: the question, the derived profile,
+  `notes.md`, the period digest, and the matching entries — the same text
+  you can read in the terminal.
 - Retrieval is hybrid (keyword + vector RRF) when the embedding artifact is
   fresh and the model loads; **any** failure degrades silently to the
   keyword list. `ask` never fails over embeddings.
@@ -137,8 +142,9 @@ describes the behavior a user or an AI will observe.
 - Ranked retrieval: `keyword` (token hits), `vector` (cosine top-N over the
   fresh artifact), `hybrid` (reciprocal-rank fusion of the two — the
   default). N defaults to 10.
-- Output: a provenance line, then one line per hit —
-  `rank⇥seq⇥score (6 decimals)⇥view line`.
+- Output: one line per hit, in rank order, and nothing else —
+  `SEQ  YYYY-MM-DD HH:MM  [tag]… text   (score)`, the score to 3 decimals
+  (dimmed on a TTY).
 - `vector`/`hybrid` need a fresh embedding artifact and the model; without
   them they print an actionable line on stderr and fail with
   `EmbeddingsUnavailable`. `keyword` needs only the journal.
@@ -148,10 +154,11 @@ describes the behavior a user or an AI will observe.
 Everything derived is a pure function of the verified log, records the log
 state it came from, and is safe to delete — deleting it loses nothing.
 
-**Profile** — `zephyr profile` prints the derived profile plus `notes.md`.
-The profile is `profile.md` (`# zephyr-profile: v1 range=… head=…`); it is
-rebuilt from the log when stale. `notes.md` is the user's own file and is
-never rewritten by zephyr.
+**Profile** — `zephyr profile` prints the derived profile plus `notes.md`
+(when present, your notes come first under `notes`, the derived part under
+`about you`). The profile is `profile.md`
+(`# zephyr-profile: v2 range=… head=…`); it is rebuilt from the log when
+stale. `notes.md` is the user's own file and is never rewritten by zephyr.
 
 **Status** — `zephyr derived status` prints one line per artifact —
 `index`, `profile`, `embed`, and every stored digest (`digest
@@ -172,7 +179,8 @@ rendered on demand by `recap` and `ask`; the AI reads a digest first and
 drills into raw entries only when needed.
 
 **Recap** — `zephyr recap [start..end]` prints the period digest (default:
-the current week, Monday–Sunday).
+the current week, Monday–Sunday): a `YYYY-MM-DD – YYYY-MM-DD · N entries`
+line, then the period's tags and top words.
 
 ## Semantic search (Phase 8)
 
@@ -274,7 +282,7 @@ flowchart TD
     G --> H["7 · ots-export, anchor externally, ots-stamp — a network witness"]
     H --> I["8 · zephyr rank / recap / profile"]
     I --> J["9 · zephyr ask / export --for-ai / mcp"]
-    J --> K["every AI-facing output carries the provenance of the verified log state"]
+    J --> K["the AI reads the same clean view the terminal shows; the log state it came from is bound in the on-disk artifacts"]
 ```
 
 Capture is the whole daily loop — steps 1–2 in seconds. Steps 3–4 happen
