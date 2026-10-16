@@ -22,6 +22,9 @@ pub const RunError = error{
     // The embedding surface (spec/semantic.md sections 5, 7): the artifact
     // is missing or stale, or the model cannot be resolved.
     EmbeddingsUnavailable,
+    // The editor surface (cli/editor.zig): the temp-file path does not fit
+    // the buffer. The editor's exit status is not an error (it cancels).
+    TmpPathTooLong,
 } || core.anchor.SignError || core.journal.OpenError || core.journal.Journal.AppendError ||
     core.journal.Journal.VerifyError || core.journal.Journal.RedactError ||
     core.journal.Journal.CheckAnchorsError || core.journal.Journal.WriteAnchorError ||
@@ -32,4 +35,6 @@ pub const RunError = error{
     std.Io.Reader.ShortError || std.crypto.errors.IdentityElementError || std.process.CurrentPathError ||
     mcp.server.RunError || embed_mod.CreateError || // Phase 8: the embedding surface (rank, ask hybrid, derived rebuild --embeddings)
     embed_mod.FetchError || // distribution: model fetch (download, verify, install)
-    std.process.CurrentPathAllocError; // model fetch: a relative $ZEPHYR_EMBED_MODEL is resolved against the cwd
+    std.process.CurrentPathAllocError || // model fetch: a relative $ZEPHYR_EMBED_MODEL is resolved against the cwd
+    std.process.SpawnError || // editor: $VISUAL/$EDITOR could not be spawned
+    std.Io.Dir.DeleteFileError; // editor: a stale temp file from a crashed run cannot be removed

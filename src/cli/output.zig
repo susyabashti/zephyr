@@ -111,8 +111,12 @@ pub fn printUsage(file: File, io: Io) File.Writer.Error!void {
         \\zephyr — local-first, tamper-evident journal
         \\
         \\Usage:
-        \\  zephyr "text"                     quick log
-        \\  zephyr log [-t TAG]... "text"     log with optional tags
+        \\  zephyr                          open the editor to log a new
+        \\                                   entry
+        \\  zephyr "text"                   quick log
+        \\  zephyr log [-t TAG]... "text"   log with optional tags; with no
+        \\                                   text (on a TTY) the editor is
+        \\                                   opened instead
         \\  zephyr today | yesterday | week   entries for today, yesterday,
         \\                                   or the current week (Mon-Sun)
         \\  zephyr on YYYY-MM-DD              entries on a specific date
@@ -141,7 +145,10 @@ pub fn printUsage(file: File, io: Io) File.Writer.Error!void {
         \\                                   whether it matches the pin
         \\  zephyr edit <seq> [-t TAG]... "text"
         \\                                   amend an entry (tags kept unless
-        \\                                   -t is given)
+        \\                                   -t is given); with only a seq
+        \\                                   (on a TTY) the editor is opened,
+        \\                                   seeded with the current text
+        \\                                   and tags
         \\  zephyr rm <seq>                   hide an entry (tombstone)
         \\  zephyr redact <seq> [--yes]       remove an entry's content from the
         \\                                   file (headers and chain are kept)
@@ -163,6 +170,11 @@ pub fn printUsage(file: File, io: Io) File.Writer.Error!void {
         \\  zephyr mcp [--allow-write]      start the read-only MCP (AI) server
         \\                                   on stdio; --allow-write enables
         \\                                   the add_entry tool
+        \\
+        \\In the editor, the first line `# tags: a, b` holds the entry's tags
+        \\ (comma-separated; an empty or absent line means no tags); the
+        \\ remaining lines are the text, joined into one. Saving with an
+        \\ empty text — or without any change, when amending — cancels.
         \\
         \\.Options:
         \\  --journal PATH    journal directory (default: $ZEPHYR_HOME or

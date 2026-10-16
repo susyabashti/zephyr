@@ -1,4 +1,5 @@
-//! CLI: zephyr <text>  |  zephyr log [-t TAG]... <text>  |  zephyr verify
+//! CLI: zephyr (editor)  |  zephyr <text>  |  zephyr log [-t TAG]... <text>
+//!     |  zephyr verify
 //!     zephyr today | yesterday | week | on YYYY-MM-DD  |  zephyr search <q>
 //!     zephyr ask [from:to] <question...>  |  zephyr recap [start..end]
 //!     zephyr profile  |  zephyr derived status|rebuild
@@ -81,8 +82,10 @@ pub fn run(init: std.process.Init, argv: []const []const u8) RunError!void {
         }
     }
     if (i >= argv.len) {
-        try output.printUsage(err_file, io);
-        return error.Usage;
+        // `zephyr` with no command opens the editor for a new entry; log
+        // decides editor-vs-usage (it owns the TTY check).
+        const path = try cli_journal.resolveJournalPath(arena, io, init.environ_map, journal_path);
+        return log_cmd.run(arena, gpa, io, style, init.environ_map, path, &.{});
     }
     const command = argv[i];
 
@@ -123,7 +126,7 @@ pub fn run(init: std.process.Init, argv: []const []const u8) RunError!void {
     } else if (std.mem.eql(u8, command, "rank")) {
         return rank_cmd.run(arena, gpa, io, style, err_file, out, init.environ_map, path, rest, no_pager);
     } else if (std.mem.eql(u8, command, "edit")) {
-        return edit_cmd.run(arena, io, style, err_file, out, init.environ_map, path, rest);
+        return edit_cmd.run(arena, gpa, io, style, err_file, out, init.environ_map, path, rest);
     } else if (std.mem.eql(u8, command, "rm")) {
         return rm_cmd.run(arena, io, style, err_file, out, init.environ_map, path, rest);
     } else if (std.mem.eql(u8, command, "redact")) {

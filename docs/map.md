@@ -64,20 +64,21 @@ deterministic fake.
 | `src/core/tokens.zig` | tokenizer + frozen stopword lists for the derived layer |
 | `src/core/timezone.zig` | local tz-offset resolution (`TZ`, `/etc/localtime`) for record headers |
 | `src/cli/cli.zig` | thin CLI entry: global options, journal path, dispatch to `commands/` |
-| `src/cli/args.zig` | argument/flag parsing shared by commands: `-t TAG`, free text, civil dates and ranges, the current week |
+| `src/cli/args.zig` | argument/flag parsing shared by commands: `-t TAG`, free text, civil dates and ranges, the current week, and environment command specs ($PAGER, $VISUAL/$EDITOR) split into argv |
+| `src/cli/editor.zig` | editor-based create/amend: $VISUAL → $EDITOR → `vi` on a temp buffer beside the journal; the `# tags:` line as the tag source of truth; canceling as a union tag, not an error; the temp file removed on every path |
 | `src/cli/errors.zig` | the CLI error set (`cli.RunError`): the union of every command's failures, mapped to exit codes in `main.zig` |
 | `src/cli/journal.zig` | shared journal access: path resolution (`--journal`, `$ZEPHYR_HOME`), open, verify-before-trust gate, wall clock, footer head |
 | `src/cli/output.zig` | all CLI formatting and rendering: stdout/stderr writers, usage text, FAIL/status/anchor lines, the day rule and the TTY word wrap |
-| `src/cli/pager.zig` | git-style pagination of long TTY output: `$PAGER` (default `less -R`), the `--no-pager`/`$NO_PAGER`/empty-`$PAGER` off-switches, a direct-write fallback |
+| `src/cli/pager.zig` | git-style pagination of long TTY output: `$PAGER` (default `less -R`), the `--no-pager`/`$NO_PAGER`/empty-`$PAGER` off-switches, a direct-write fallback; its `Args` are re-exported from args.zig (shared with the editor) |
 | `src/cli/table.zig` | TTY presentation of the derived surfaces: terminal-size probe, the shared name/count/bar table, the styled `recap`/`profile` bodies (piped bytes never go through here) |
 | `src/cli/embed_helpers.zig` | shared model-load helpers for the embedding commands: path resolution, auto-fetch, actionable error reporting |
 | `src/cli/render_tests.zig` | test root for the CLI layer: pulls the styled renderer tests into the test step (no logic) |
 | `src/cli/commands/ask.zig` | `zephyr ask` — deterministic context pack for the user's AI; degrades to keyword when embeddings fail |
 | `src/cli/commands/checkpoint.zig` | `zephyr checkpoint` — sign the verified journal state into a `.zpa` anchor |
 | `src/cli/commands/derived.zig` | `zephyr derived status\|rebuild` — inspect/force-rebuild derived artifacts; `--embeddings` loads the model |
-| `src/cli/commands/edit.zig` | `zephyr edit` — amend an entry (tags carried over unless `-t`) |
+| `src/cli/commands/edit.zig` | `zephyr edit` — amend an entry (tags carried over unless `-t`); with only a seq on a TTY, the editor opens seeded with the current text and tags |
 | `src/cli/commands/export.zig` | `zephyr export --for-ai [range]` — the LLM view of the log; refuses a failing log |
-| `src/cli/commands/log.zig` | `zephyr log` (+ the bare-word quick log) — prints `✓ logged seq N` |
+| `src/cli/commands/log.zig` | `zephyr log` (+ the bare-word quick log, and bare `zephyr`) — prints `✓ logged seq N`; with no text on a TTY, the editor opens on an empty buffer |
 | `src/cli/commands/mcp.zig` | `zephyr mcp` — run the read-only MCP server over stdio |
 | `src/cli/commands/model.zig` | `zephyr model fetch\|status` — manage the pinned model (works in `--no-embed` builds) |
 | `src/cli/commands/ots-export.zig` | `zephyr ots-export` — write a segment's footer head for external OTS tooling |
