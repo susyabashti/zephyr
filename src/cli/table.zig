@@ -22,22 +22,44 @@ pub const FallbackWidth: usize = 72;
 /// The styled renderers' errors: allocation and the civil-date math.
 pub const RenderError = Allocator.Error || error{TimestampOutOfRange};
 
-fn ttyCols(file: File, request: c_int) usize {
+/// The terminal size of a sized stream, as reported by TIOCGWINSZ.
+pub const TerminalSize = struct {
+    rows: u16,
+    cols: u16,
+};
+
+/// The fixed row count when the terminal size is unknown: the pager's
+/// page threshold (plan section 13.7).
+pub const FallbackRows: u16 = 40;
+
+fn ttySize(file: File, request: c_int) ?std.posix.winsize {
     var ws: std.posix.winsize = undefined;
-    if (std.c.ioctl(file.handle, request, &ws) == 0 and ws.col > 0) return @intCast(ws.col);
-    return FallbackWidth;
+    if (std.c.ioctl(file.handle, request, &ws) == 0 and ws.row > 0 and ws.col > 0) return ws;
+    return null;
 }
 
-/// The terminal column count of `file` (TIOCGWINSZ), or FallbackWidth
-/// when the stream is not a sized terminal. The request code is defined
-/// differently per OS: macOS `_IOR('t', 104, struct winsize)`, Linux the
-/// fixed number.
+/// The terminal size of `file` (TIOCGWINSZ), or null when the stream is
+/// not a sized terminal. The request code is defined differently per OS:
+/// macOS `_IOR('t', 104, struct winsize)`, Linux the fixed number.
+pub fn terminalSize(file: File) ?TerminalSize {
+    const ws = switch (@import("builtin").os.tag) {
+        .macos => ttySize(file, 0x40087468),
+        .linux => ttySize(file, 0x5413),
+        else => null,
+    } orelse return null;
+    return .{ .rows = ws.row, .cols = ws.col };
+}
+
+/// The terminal column count of `file`, or FallbackWidth when the stream
+/// is not a sized terminal.
 pub fn terminalColumns(file: File) usize {
-    return switch (@import("builtin").os.tag) {
-        .macos => ttyCols(file, 0x40087468),
-        .linux => ttyCols(file, 0x5413),
-        else => FallbackWidth,
-    };
+    return if (terminalSize(file)) |s| s.cols else FallbackWidth;
+}
+
+/// The terminal row count of `file`, or FallbackRows when the stream is
+/// not a sized terminal. The pager pages output taller than this.
+pub fn terminalRows(file: File) u16 {
+    return if (terminalSize(file)) |s| s.rows else FallbackRows;
 }
 
 /// The number of `█` blocks for `count` against the table's `max_count`:

@@ -164,14 +164,144 @@ pub fn printUsage(file: File, io: Io) File.Writer.Error!void {
         \\                                   on stdio; --allow-write enables
         \\                                   the add_entry tool
         \\
-        \\Options:
+        \\.Options:
         \\  --journal PATH    journal directory (default: $ZEPHYR_HOME or
         \\                    ~/.local/share/zephyr)
+        \\  --no-pager        print long output directly, without a pager
         \\  --version         print version
         \\  --help            this help
         \\
     ;
     return File.writeStreamingAll(file, io, usage);
+}
+
+/// The day rule of a styled day view: `== ` + the blue title date + a dim
+/// weekday, an optional dim ` (today)` marker, and a dim `=` fill padding
+/// the line to `width` display columns (no fill when the styled head
+/// reaches `width`). Intermediates leak to the caller's arena, like the
+/// other styled renderers.
+pub fn dayRule(
+    allocator: Allocator,
+    style: Style,
+    date_str: []const u8,
+    weekday: []const u8,
+    is_today: bool,
+    width: usize,
+) Allocator.Error![]const u8 {
+    const head_len = 3 + date_str.len + 1 + weekday.len + (if (is_today) " (today)".len else 0);
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, "== ");
+    try out.appendSlice(allocator, try style.title(allocator, date_str));
+    try out.append(allocator, ' ');
+    try out.appendSlice(allocator, try style.dim(allocator, weekday));
+    if (is_today) try out.appendSlice(allocator, try style.dim(allocator, " (today)"));
+    if (width > head_len) {
+        const fill = try allocator.alloc(u8, width - head_len);
+        @memset(fill, '=');
+        try out.appendSlice(allocator, try style.dim(allocator, fill));
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// Wrap `text` to `width` display columns: greedy word wrap on ASCII
+/// spaces (runs collapse; a trailing run drops), with continuation lines
+/// indented to `indent` — the column the text's first line starts in. A
+/// word longer than the available width hard-splits. Display width is the
+/// code point count: exact for Latin and Hebrew, an approximation for
+/// wide (e.g. CJK) characters. When `width <= indent` or `text` is empty,
+/// `text` is returned as-is. The returned slice is owned by `allocator`
+/// unless it is the input as-is — the caller must never free it (it is
+/// either an arena leak or the caller's own text).
+pub fn wrapText(allocator: Allocator, text: []const u8, width: usize, indent: usize) Allocator.Error![]const u8 {
+    if (width <= indent or text.len == 0) return text;
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+    var it = std.mem.splitScalar(u8, text, '\n');
+    var first_segment = true;
+    while (it.next()) |segment| {
+        if (!first_segment) try out.append(allocator, '\n');
+        first_segment = false;
+        try wrapLine(allocator, &out, segment, width - indent, indent);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// Append `line` to `out`, wrapped to `avail` display columns with the
+/// continuation indent of `indent` columns.
+fn wrapLine(allocator: Allocator, out: *std.ArrayList(u8), line: []const u8, avail: usize, indent: usize) Allocator.Error!void {
+    var state = wrapLineState{};
+    var it = std.unicode.Wtf8View.initUnchecked(line).iterator();
+    while (it.peekCodepoint()) |cp| {
+        if (cp == ' ') {
+            _ = it.nextCodepointSlice() orelse unreachable; // peekCodepoint saw it
+            continue; // spaces collapse; a trailing run drops
+        }
+        const rest = it.peek(std.math.maxInt(usize));
+        const word = rest[0 .. std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len];
+        try emitWord(allocator, out, word, avail, indent, &state);
+        // Step past the word (the separator space is the loop's job).
+        var k = wtf8CodepointCount(word);
+        while (k > 0) : (k -= 1) _ = it.nextCodepointSlice() orelse unreachable; // peekCodepoint saw the word
+    }
+}
+
+/// Append `word` to the line: a space separator when the line is not
+/// empty and the word fits on it, otherwise a wrap first; a word longer
+/// than the available width hard-splits across lines.
+fn emitWord(allocator: Allocator, out: *std.ArrayList(u8), word: []const u8, avail: usize, indent: usize, state: *wrapLineState) Allocator.Error!void {
+    const wc = wtf8CodepointCount(word);
+    if (!state.empty and state.used + 1 + wc > avail) {
+        try wrapTo(allocator, out, indent);
+        state.used = 0;
+    } else if (!state.empty) {
+        try out.append(allocator, ' ');
+        state.used += 1;
+    }
+    state.empty = false;
+    var w = std.unicode.Wtf8View.initUnchecked(word).iterator();
+    var remaining = word;
+    while (remaining.len > 0) {
+        const room = avail - state.used;
+        if (room < 1) {
+            try wrapTo(allocator, out, indent);
+            state.used = 0;
+            continue; // recompute the room on the fresh line
+        }
+        const chunk = w.peek(room);
+        const n = wtf8CodepointCount(chunk);
+        try out.appendSlice(allocator, chunk);
+        state.used += n;
+        remaining = remaining[chunk.len..];
+        var k = n;
+        while (k > 0) : (k -= 1) _ = w.nextCodepointSlice() orelse unreachable; // peek saw the chunk
+        if (remaining.len > 0) {
+            try wrapTo(allocator, out, indent);
+            state.used = 0;
+        }
+    }
+}
+
+/// A wrap: a newline and `indent` spaces.
+fn wrapTo(allocator: Allocator, out: *std.ArrayList(u8), indent: usize) Allocator.Error!void {
+    try out.append(allocator, '\n');
+    for (0..indent) |_| try out.append(allocator, ' ');
+}
+
+/// The current line's state while wrapping: the display columns used so
+/// far, and whether the line has any content yet.
+const wrapLineState = struct {
+    used: usize = 0,
+    empty: bool = true,
+};
+
+/// The code point count of `s`, trusted to be valid WTF-8 (journal text
+/// is; the frozen text rules forbid control bytes).
+fn wtf8CodepointCount(s: []const u8) usize {
+    var n: usize = 0;
+    var it = std.unicode.Wtf8View.initUnchecked(s).iterator();
+    while (it.nextCodepointSlice()) |_| n += 1;
+    return n;
 }
 
 /// The first six bytes as twelve lowercase hex digits (status lines only;
@@ -313,4 +443,83 @@ fn prettyArtifactName(allocator: Allocator, name: []const u8) Allocator.Error![]
         return allocator.print("digest {s}..{s}", .{ period[0..sep], period[sep + 1 ..] });
     }
     return allocator.dupe(u8, name);
+}
+
+test "dayRule: title date, dim weekday, (today) marker, dim fill to the width" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const on = Style{ .enabled = true };
+    const e = "\x1b[";
+    // The `=` fill is built in a loop: ++ concatenation is comptime-only.
+    var want = std.ArrayList(u8).empty;
+    defer want.deinit(allocator);
+
+    // Width 40, the head ("== " ++ "2026-01-01" ++ " " ++ "Thu") is 17: 23 fill.
+    {
+        try want.appendSlice(allocator, "== " ++ e ++ "1;34m2026-01-01" ++ e ++ "0m " ++ e ++ "2mThu" ++ e ++ "0m" ++ e ++ "2m");
+        for (0..23) |_| try want.append(allocator, '=');
+        try want.appendSlice(allocator, e ++ "0m");
+        const got = try dayRule(allocator, on, "2026-01-01", "Thu", false, 40);
+        defer allocator.free(got);
+        try std.testing.expectEqualSlices(u8, want.items, got);
+    }
+
+    // The (today) marker shortens the fill by its display length (8): 15.
+    want.clearRetainingCapacity();
+    {
+        try want.appendSlice(allocator, "== " ++ e ++ "1;34m2026-01-01" ++ e ++ "0m " ++ e ++ "2mThu" ++ e ++ "0m" ++ e ++ "2m (today)" ++ e ++ "0m" ++ e ++ "2m");
+        for (0..15) |_| try want.append(allocator, '=');
+        try want.appendSlice(allocator, e ++ "0m");
+        const got = try dayRule(allocator, on, "2026-01-01", "Thu", true, 40);
+        defer allocator.free(got);
+        try std.testing.expectEqualSlices(u8, want.items, got);
+    }
+
+    // Styling off: no SGR at all.
+    want.clearRetainingCapacity();
+    {
+        try want.appendSlice(allocator, "== 2026-01-01 Thu");
+        for (0..23) |_| try want.append(allocator, '=');
+        const got = try dayRule(allocator, Style.off, "2026-01-01", "Thu", false, 40);
+        defer allocator.free(got);
+        try std.testing.expectEqualSlices(u8, want.items, got);
+    }
+
+    // A width at or under the head's display length: no fill.
+    const got = try dayRule(allocator, on, "2026-01-01", "Thu", false, 17);
+    defer allocator.free(got);
+    try std.testing.expectEqualStrings(
+        "== " ++ e ++ "1;34m2026-01-01" ++ e ++ "0m " ++ e ++ "2mThu" ++ e ++ "0m",
+        got,
+    );
+}
+
+test "wrapText: greedy wrap, hard split, and the degenerate cases" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Greedy: words flow until the next would exceed the width (20 - 4
+    // = 16 available); the continuation line is indented to column 4.
+    // The results are never freed: the wrapped cases belong to the arena
+    // and the degenerate cases return the input as-is (freeing that would
+    // write through the allocator into read-only memory).
+    const got = try wrapText(allocator, "aa bb cc dd ee ff gg", 20, 4);
+    try std.testing.expectEqualStrings("aa bb cc dd ee\n    ff gg", got);
+
+    // A word longer than the available width (8 - 2 = 6) hard-splits.
+    try std.testing.expectEqualStrings("abcdef\n  ghijkl", try wrapText(allocator, "abcdefghijkl", 8, 2));
+
+    // An embedded newline: each line wraps independently.
+    try std.testing.expectEqualStrings("one two\nthree\nfour five\nsix", try wrapText(allocator, "one two three\nfour five six", 12, 0));
+
+    // Space runs collapse; a trailing run drops.
+    try std.testing.expectEqualStrings("a b c", try wrapText(allocator, "a  b   c ", 10, 0));
+
+    // No room (width <= indent) or empty text: unchanged.
+    try std.testing.expectEqualStrings("aa bb", try wrapText(allocator, "aa bb", 4, 4));
+    try std.testing.expectEqualStrings("", try wrapText(allocator, "", 80, 0));
 }

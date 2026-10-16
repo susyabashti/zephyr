@@ -7,6 +7,7 @@ const core = @import("zephyr_core");
 const errors = @import("../errors.zig");
 const args = @import("../args.zig");
 const output = @import("../output.zig");
+const pager = @import("../pager.zig");
 const cli_journal = @import("../journal.zig");
 
 const Io = std.Io;
@@ -22,6 +23,7 @@ pub fn run(
     environ_map: *const std.process.Environ.Map,
     path: []const u8,
     rest: []const []const u8,
+    no_pager: bool,
 ) errors.RunError!void {
     const query = try args.joinParts(arena, rest);
     if (query.len == 0) return error.Usage;
@@ -40,7 +42,7 @@ pub fn run(
         try renderStyled(arena, style, matches, query)
     else
         try core.search.render(arena, matches, query);
-    try output.printBlock(out, io, rendered);
+    try pager.show(out, io, environ_map, path, no_pager, rendered);
 }
 
 /// The styled search view (TTY only). The same bytes as

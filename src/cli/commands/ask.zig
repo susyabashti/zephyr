@@ -11,6 +11,7 @@ const embed_mod = @import("zephyr_embed");
 const errors = @import("../errors.zig");
 const args = @import("../args.zig");
 const output = @import("../output.zig");
+const pager = @import("../pager.zig");
 const cli_journal = @import("../journal.zig");
 
 const Io = std.Io;
@@ -26,6 +27,7 @@ pub fn run(
     environ_map: *const std.process.Environ.Map,
     path: []const u8,
     rest: []const []const u8,
+    no_pager: bool,
 ) errors.RunError!void {
     // Optional leading period: YYYY-MM-DD or YYYY-MM-DD:YYYY-MM-DD.
     var range: ?core.view.DayRange = null;
@@ -80,5 +82,5 @@ pub fn run(
     // YYYY-MM-DD in the question, else the current week — is resolved
     // inside the pack (spec/derived.md section 7, step 5).
     const pack = try core.dstore.contextPack(arena, &journal, &visible, result, question, range, true, hybrid);
-    try output.printBlock(out, io, pack);
+    try pager.show(out, io, environ_map, path, no_pager, pack);
 }
