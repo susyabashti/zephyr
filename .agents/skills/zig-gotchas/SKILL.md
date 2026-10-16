@@ -9,7 +9,8 @@ description: >
   Target.native, never-mutated var, var discard), native-OS switching via
   builtin.os.tag, terminal-size probing (TIOCGWINSZ), errdefer block form,
   and zig build test quirks (silent success, stale .zig-cache binaries,
-  spurious "failed command"). Use when writing or
+  spurious "failed command"), nested-slice equality, tagged-union syntax,
+  child-process fd ownership, and TTY/pty testing. Use when writing or
   debugging Zig, when tests mysteriously do not run, on segfaults or "error
   set" compile errors, or when string, fmt, or JSON misbehaves. Companion to
   zig-api (version-specific APIs) and zig-tiger-style (style).
@@ -350,6 +351,15 @@ comptime {
   failure. Use `zig build test --summary all` for the step tree, or run the test
   binary directly (`.zig-cache/o/<hash>/test`) to see every test name.
 
+- **A green `zig build test` does not prove the exe compiles.** Test modules
+  and the exe instantiate different function sets (see 19: uninstantiated
+  bodies are not analyzed). A function whose body has a type error, reachable
+  only from the exe — a command module the test root never imports, or a
+  function no test calls — passes the test step and fails `zig build`.
+  Verified on 0.17: `zig build test` green while `zig build` reported 4
+  errors in exe-only functions; adding a test that instantiates one of the
+  functions made the test build start catching the next bug.
+
 - **`.zig-cache/o/` accumulates test binaries from every past build state,**
   including intermediate revisions that did not compile or that crashed. Running
   one of those stale binaries by hand reports a crash from the *old* code:
@@ -681,3 +691,124 @@ errdefer {
     if (cleanup_needed) deinit();
 }
 ```
+
+## 25. `std.meta.eql` (and `expectEqualSlices`) compares nested slices by pointer
+
+`std.meta.eql` — and therefore `std.testing.expectEqualSlices` /
+`expectEqual` — compares inner slices shallowly: for a `[]T` the 0.17
+`std/meta.zig` shallow path checks `a.ptr == b.ptr and a.len == b.len`. A
+`[]const []const u8` of byte-identical tokens compares as unequal when the
+inner slices come from different allocations (tokens sliced out of a
+`Environ.Map`-duped value vs string literals).
+`expectEqualSlices([]const u8, &.{ "less", "-R" }, a.slices())` fails even
+when every byte matches, with no hint why. Fix: compare inner elements
+explicitly — `try std.testing.expectEqualStrings("less", a.tokens[0]);`
+(or `std.mem.eql(u8, a.tokens[0], "less")`).
+
+## 26. Tagged-union construction: `.tag(payload)` no longer compiles (0.17)
+
+`const v: std.process.SpawnOptions.StdIo = .file(f);` →
+`error: type '@typeInfo(process.SpawnOptions.StdIo).union.tag_type.?' not a
+function`. The payload goes in struct-literal form:
+`const v: std.process.SpawnOptions.StdIo = .{ .file = f };`. Destructuring
+is unchanged (`switch (v) { .file => |f| ... }`). StdIo is the std case that
+bites: payload-less tags (`.inherit`, `.pipe`) still work, so only the
+payload-carrying `.file` line errors.
+
+## 27. `std.fmt.bufPrint` returns an error union, not an optional (0.17)
+
+Returns `error{NoSpaceLeft}![]u8` (not the older `?[]u8`); the muscle-memory
+`.?` fails: `error: expected optional type, found 'error{NoSpaceLeft}![]u8'`.
+Catch like any error (`catch return error.TooLong`). Related: building an
+expected byte string with a loop-built run (e.g. `=` fills) cannot use `++`
+— string `++` is comptime-only; assemble the run in an `ArrayList(u8)` and
+compare with `expectEqualSlices(u8, want.items, got)`.
+
+## 28. `Child` owns the close of its fds; the parent must not close ahead (0.17)
+
+`std.process.wait` / `std.process.kill` do not exist — the functions live on
+the type: `std.process.Child.wait(&child, io)`,
+`std.process.Child.kill(&child, io)`. Both `wait` and `kill` clean up the
+child: they close the tracked stdin/stdout/stderr fds **exactly once**
+(`childCleanupPosix`). Two failure modes, opposite sides of one constraint:
+
+1. **Parent pre-closes a tracked fd** (classic: close the pipe-stdin write
+   end after writing, then `wait`) → the cleanup close hits a closed fd →
+   EBADF → `recoverableOsBugDetected()`: `panic: reached unreachable code`
+   through `closeFd` / `childCleanupPosix` in `std/Io/Threaded.zig`. In
+   **debug** that is `unreachable` (abort, SIGABRT); in **release**
+   `recoverableOsBugDetected` is a silent no-op — and the freed fd number
+   may be reused in the window, so the cleanup close may hit an unrelated
+   fd. A bug that "works" in release.
+2. **Parent never closes the pipe-stdin write end** (because it must not,
+   per 1) → any child that reads to EOF before exiting (`cat`, `wc`,
+   `less` waiting for all input) **deadlocks**: EOF only arrives from the
+   cleanup close, which happens only after the child exits. `PAGER=cat`
+   hangs forever.
+
+The pattern that works: hand the child a **regular file** as stdin
+(`stdin = .{ .file = f }`) — natural EOF, fd closed exactly once by the
+child's cleanup (a pager uses a pid-named temp file in a private dir,
+removed after the child exits). Design constraints, all 0.17, source-
+verified: `StdIo.file` **dups** the fd into the child (the parent's copy
+stays open — the parent closes it after `spawn`); `Child` fields (`id`,
+`stdin`, …) are private (you cannot null `child.stdin` to skip the cleanup
+close); `File` has no public constructor from a raw fd (no fd-level surgery
+around `Child` bookkeeping); `kill` sends SIGTERM then reaps and is
+"idempotent" only because `child.id` is nulled after a successful wait/kill
+— calling it on a dead-unreaped child is ESRCH → `errnoBug` → panic in
+debug. General rule: std's `recoverableOsBugDetected` / `errnoBug` paths
+are no-ops in release and panics in debug — anything landing on them works
+in one build mode and aborts (or silently mis-closes) in the other.
+
+## 29. `Dir.*Absolute` assert absolute paths (0.17)
+
+`deleteFileAbsolute` / `createFileAbsolute` / `openFileAbsolute` carry a
+debug assert on the input: a relative path (e.g. `".tmp-foo/bar"`) →
+`panic: reached unreachable code` at
+`assert(path.isAbsolute(absolute_path))` in `std/Io/Dir.zig`. Resolve first:
+`std.process.currentPathAlloc(io, allocator)` + join (codebase idiom:
+canonicalize the data path once at entry; everything downstream is
+absolute).
+
+## 30. `/bin/true` is gone on recent macOS
+
+`spawn` with `.exe = .detect` and `/bin/true` → `error.FileNotFound`
+(ENOENT from posix_spawn) on current macOS (the `/bin` POSIX shims were
+removed). `/usr/bin/true` exists on both macOS and Linux. Rule of thumb:
+anything a test spawns by absolute path must be `ls`-verified on every CI
+OS before the test is written.
+
+## 31. TTY/pager tests: `script` pty is 0x0; prove the path with a fake pager
+
+`script -q file cmd` gives the child a pty of size **0x0** (`stty size`
+inside prints `0 0`); terminal-size code that falls back on 0x0 sees a
+different world than a real 80x24. Set the size inside the command:
+`script -q cap.txt sh -c 'stty cols 80 rows 24; exec myapp ...'`. A 0x0
+pty can also **kill the child at startup** (`less` dies on a 0-row
+terminal); if the code has a "write failed → direct fallback" path (EPIPE),
+the 0x0 harness exercises the fallback and "passes" while the real path is
+broken — tell: full un-paginated output in the typescript. Verify pager/
+child-stdin paths deterministically with a **fake pager** — a `#!/bin/sh`
+script that records `echo "PAGER CALLED: $@" > /tmp/pager_call.txt` then
+`cat > /tmp/pager_stdin.txt` then `exit 0` — and assert on the recorded
+argv, the recorded stdin bytes (EOF delivery included: `cat` only exits
+when the write end is closed / the file ends), and the exit status. For
+real `less`, feed a delayed `q`: `(sleep 2; printf q) | script -q cap.txt
+...`. `script` propagates the child's exit status (verified:
+`sh -c 'exit 3'` → 3); an aborted child reported as 6 (SIGABRT) through
+`script` + `sh`.
+
+## 32. More 0.17 one-liner burns
+
+- `for (std.mem.splitScalar(u8, s, ' ')) |seg|` does not compile — the
+  split iterator is while-driven:
+  `var it = std.mem.splitScalar(u8, s, ' '); while (it.next()) |seg| { ... }`.
+- Bare optional-capture expressions without the `if` keyword are invalid:
+  `opt |s| s.len else 0` → error; it must be `if (opt) |s| s.len else 0`.
+- `*const [N]T` does not coerce to `[]T` (const mismatch); slicing a
+  `const` array yields `[]const T`, not `[]T`.
+- `{d}` is not a valid fmt for `bool` (`error: invalid format string 'd'
+  for type 'bool'`); use `{any}`.
+- The process id is `std.posix.system.getpid()` — there is no
+  `std.posix.getpid` and no `std.process.getPid` in 0.17.
