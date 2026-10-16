@@ -28,11 +28,17 @@ pub const IndexFile = "derived/index.zdi";
 pub const EmbedFile = "derived/embed.zde";
 pub const ProfileFile = "profile.md";
 pub const NotesFile = "notes.md";
-pub const ProfileHeader = "# zephyr-profile: v2 ";
-/// The pre-v2 header: a v1 document is stale (rewritten by the next
+pub const ProfileHeader = "# zephyr-profile: v3 ";
+/// The pre-v3 headers: a v1 or v2 document is stale (rewritten by the next
 /// persisting read), never legacy — migrating it would append its machine
-/// text to the user's notes.md (spec/derived.md section 6).
+/// text to the user's notes.md (spec/derived.md section 6). Both artifacts
+/// are machine-derived; user voice lives in notes.md.
 const LegacyV1Header = "# zephyr-profile: v1 ";
+const LegacyV2Header = "# zephyr-profile: v2 ";
+/// The digest header prefix (spec/derived.md section 5): a document
+/// without it is stale-by-version — its head may still match, but its body
+/// predates the v2 lines.
+pub const DigestHeaderPrefix = "# zephyr-digest: v2 ";
 
 /// Default cap on the pack's rendered match lines (spec/derived.md section 7).
 pub const PackMatchCap: usize = 8 << 10;
@@ -240,6 +246,10 @@ pub fn loadFreshDigest(
     const name = try digestFileName(allocator, range);
     defer allocator.free(name);
     const doc = (try readJournalOrNull(allocator, journal, name)) orelse return null;
+    if (!std.mem.startsWith(u8, doc, DigestHeaderPrefix)) {
+        allocator.free(doc);
+        return null; // stale-by-version: the next read rebuilds it
+    }
     const fresh = try headLineMatches(allocator, doc, result.head);
     if (!fresh) {
         allocator.free(doc);
@@ -294,7 +304,9 @@ pub fn saveProfile(journal: *const journal_mod.Journal, bytes: []const u8) IoErr
 pub fn migrateLegacyProfile(allocator: Allocator, journal: *const journal_mod.Journal) IoError!void {
     const doc = (try readJournalOrNull(allocator, journal, ProfileFile)) orelse return;
     defer allocator.free(doc);
-    if (std.mem.startsWith(u8, doc, ProfileHeader) or std.mem.startsWith(u8, doc, LegacyV1Header)) return;
+    if (std.mem.startsWith(u8, doc, ProfileHeader) or
+        std.mem.startsWith(u8, doc, LegacyV1Header) or
+        std.mem.startsWith(u8, doc, LegacyV2Header)) return;
 
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
@@ -867,12 +879,13 @@ pub fn artifactStatus(
         });
     }
 
-    // Profile: a document without the version header is a pre-Phase 7
-    // legacy profile; it is stale until the next persisting read migrates it.
+    // Profile: only a v3 document bound to the current head is fresh. A
+    // v1/v2 document is stale-by-version (the next persisting read rewrites
+    // it), and a pre-Phase 7 document is stale until it is migrated.
     if (try readJournalOrNull(allocator, journal, ProfileFile)) |doc| {
         defer allocator.free(doc);
-        const versioned = std.mem.startsWith(u8, doc, ProfileHeader);
-        const fresh = versioned and try headLineMatches(allocator, doc, result.head);
+        const fresh = std.mem.startsWith(u8, doc, ProfileHeader) and
+            try headLineMatches(allocator, doc, result.head);
         try items.append(allocator, .{
             .name = try allocator.dupe(u8, ProfileFile),
             .state = if (fresh) .fresh else .stale,
@@ -909,7 +922,10 @@ pub fn artifactStatus(
             if ((try readJournalOrNull(allocator, journal, full))) |doc| {
                 defer allocator.free(doc);
                 head = headFromLine(doc);
-                state = if (try headLineMatches(allocator, doc, result.head)) .fresh else .stale;
+                // A document without the v2 header prefix is stale-by-version,
+                // even when its head still matches.
+                state = if (std.mem.startsWith(u8, doc, DigestHeaderPrefix) and
+                    try headLineMatches(allocator, doc, result.head)) .fresh else .stale;
             }
             // `full` is owned by the report from here on.
             try items.append(allocator, .{

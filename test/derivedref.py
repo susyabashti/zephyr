@@ -79,6 +79,34 @@ ENTITY_STOPWORDS = {
     "July", "August", "September", "October", "November", "December",
 }
 
+# The digest top-words stopword list (spec/derived.md section 5): the
+# STOPWORDS fence, word for word and in order. Affects top-words counting
+# only.
+DIGEST_STOPWORDS = [
+    "the", "a", "this", "that", "these", "those", "my", "our", "your", "its",
+    "i", "me", "we", "us", "you", "he", "she", "it", "they", "them",
+    "be", "am", "is", "are", "was", "were", "been", "being", "do", "does",
+    "have", "has", "had", "will", "would", "should", "could", "may", "must",
+    "and", "or", "but", "so", "if", "then", "than", "not", "no", "all",
+    "in", "on", "at", "to", "of", "for", "with", "by", "from", "as",
+]
+
+
+def spec_stopwords():
+    """The STOPWORDS fence of spec/derived.md section 5, in order."""
+    spec = os.path.join(HERE, "..", "spec", "derived.md")
+    with open(spec, encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    i = lines.index("STOPWORDS:")
+    while lines[i].strip() != "```":
+        i += 1
+    out = []
+    i += 1
+    while lines[i].strip() != "```":
+        out += lines[i].split()
+        i += 1
+    return out
+
 ISSPACE = set(" \t\n\v\f\r")
 
 
@@ -372,31 +400,45 @@ def render_digest_body(ves, start, end):
     in_range = [v for v in ves if start <= v["day"] < end]
     n = len(in_range)
     red = sum(1 for v in in_range if v["redacted"])
-    tags, wc = {}, {}
+    noun = "entry" if n == 1 else "entries"
+    out = f"{fmt_date(start)} \u2013 {fmt_date(end - 1)} \u00b7 {n} {noun}"
+    if red:
+        out += f" ({red} redacted)"
+    out += "\n"
+    if n == 0:
+        return out
+    tags, wc, days = {}, {}, {}
+    for d in range(start, end):
+        days[d] = 0
     for v in in_range:
+        days[v["day"]] += 1
         if v["redacted"]:
             continue
         for t in v["tags"]:
             tags[t] = tags.get(t, 0) + 1
         for a, b in spans(v["text"]):
             w = v["text"][a:b]
-            if len(w) >= 2:
+            if len(w) >= 2 and w.lower() not in DIGEST_STOPWORDS:
                 wc[w.lower()] = wc.get(w.lower(), 0) + 1
-    noun = "entry" if n == 1 else "entries"
-    out = f"{fmt_date(start)} \u2013 {fmt_date(end - 1)} \u00b7 {n} {noun}"
-    if red:
-        out += f" ({red} redacted)"
-    out += "\n"
-    if n > 0:
-        lines = []
-        if tags:
-            items = sorted(tags.items(), key=lambda kv: (-kv[1], kv[0]))
-            lines.append("tags  " + ", ".join(f"{t} {c}" for t, c in items))
-        if wc:
-            items = sorted(wc.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
-            lines.append("top words  " + ", ".join(f"{t} {c}" for t, c in items))
-        if lines:
-            out += "\n" + "\n".join(lines) + "\n"
+    lines = []
+    if tags:
+        items = sorted(tags.items(), key=lambda kv: (-kv[1], kv[0]))
+        lines.append("tags  " + ", ".join(f"{t} {c}" for t, c in items))
+    if wc:
+        items = sorted(wc.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+        lines.append("top words  " + ", ".join(f"{t} {c}" for t, c in items))
+    pairs = [f"{fmt_date(d)} {days[d]}" for d in range(start, start + min(14, end - start))]
+    if end - start > 14:
+        more = end - start - 14
+        dnoun = "day" if more == 1 else "days"
+        pairs.append(f"\u2026 {more} more {dnoun}")
+    lines.append("activity  " + ", ".join(pairs))
+    ents = [e for e in build_entities([v for v in in_range if not v["redacted"]])
+           if e["kind"] == 1]
+    if ents:
+        ents.sort(key=lambda e: (-e["count"], e["name"]))
+        lines.append("people and places  " + ", ".join(e["name"] for e in ents[:5]))
+    out += "\n" + "\n".join(lines) + "\n"
     return out
 
 
@@ -407,7 +449,7 @@ def render_digest(ves, start, end, head):
         seq_range = f"{min(seqs)}..{max(seqs)}"
     else:
         seq_range = "0..0"
-    header = (f"# zephyr-digest: period={fmt_date(start)}..{fmt_date(end - 1)} "
+    header = (f"# zephyr-digest: v2 period={fmt_date(start)}..{fmt_date(end - 1)} "
               f"range=seq {seq_range} head={head.hex()}\n")
     return header + render_digest_body(ves, start, end)
 
@@ -431,14 +473,54 @@ def render_profile_body(ves, entities):
         out += f" ({red} redacted)"
     out += "\n\n"
 
-    def names(kind):
+    # weekday (Mon-first) and time-of-day band, over all visible entries
+    # (redacted included: these stats are over the entries' days/hours, not
+    # their text).
+    wd = {}
+    for v in ves:
+        w = civil_date(v["day"]).weekday()
+        wd[w] = wd.get(w, 0) + 1
+    WDN = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    best_wd = min(range(7), key=lambda i: (-wd.get(i, 0), i))
+    tb = {}
+    for v in ves:
+        h = ((v["ts_ms"] + v["tz"] * 60_000) // 1000) % 86_400 // 3600
+        band = 3 if h >= 23 or h < 5 else 0 if h < 12 else 1 if h < 17 else 2
+        tb[band] = tb.get(band, 0) + 1
+    BANDS = ["morning", "afternoon", "evening", "night"]
+    best_band = min(range(4), key=lambda i: (-tb.get(i, 0), i))
+    # Longest run of consecutive civil days with at least one entry.
+    best_run = run = 0
+    prev = None
+    for d in sorted({v["day"] for v in ves}):
+        run = run + 1 if prev is not None and d == prev + 1 else 1
+        best_run = max(best_run, run)
+        prev = d
+    # Tokens (length >= 2) over the non-redacted entries, divided by the
+    # total entry count, truncated.
+    total = 0
+    for v in ves:
+        if v["redacted"]:
+            continue
+        for a, b in spans(v["text"]):
+            if len(v["text"][a:b]) >= 2:
+                total += 1
+    avg = total // n
+
+    def names(kind, with_counts):
         items = [e for e in entities if e["kind"] == kind]
         items.sort(key=lambda e: (-e["count"], e["name"]))
+        if with_counts:
+            return ", ".join(f"{e['name']} {e['count']}" for e in items[:10]) or "\u2014"
         return ", ".join(e["name"] for e in items[:10]) or "\u2014"
 
-    # Labels padded to the longest label plus two spaces.
-    labels = ["most active", "tags", "people and places"]
-    values = [f"{by:04d}-{bm + 1:02d}", names(0), names(1)]
+    # All seven labels are always present, so the longest decides the
+    # column width.
+    labels = ["most active", "weekday", "time of day", "streak",
+              "avg words", "tags", "people and places"]
+    values = [f"{by:04d}-{bm + 1:02d}", WDN[best_wd], BANDS[best_band],
+              f"{best_run} day" if best_run == 1 else f"{best_run} days",
+              str(avg), names(0, True), names(1, False)]
     width = max(len(l) for l in labels) + 2
     for label, value in zip(labels, values):
         out += label.ljust(width) + value + "\n"
@@ -447,7 +529,7 @@ def render_profile_body(ves, entities):
 
 def render_profile(ves, entities, record_count, head):
     rng = "none" if record_count == 0 else f"seq 0..{record_count - 1}"
-    header = f"# zephyr-profile: v2 range={rng} head={head.hex()}\n"
+    header = f"# zephyr-profile: v3 range={rng} head={head.hex()}\n"
     return header + render_profile_body(ves, entities)
 
 
@@ -572,6 +654,9 @@ def run_gate(binary):
 
         question = "anything about auth or Alice?"
         rng = (DAY0, DAY0 + 5)  # 2026-01-01 .. 2026-01-05 inclusive
+
+        # The digest stopword list must match the spec fence word for word.
+        expect(spec_stopwords() == DIGEST_STOPWORDS, "spec stopword list drifted")
 
         # ---- fixture ------------------------------------------------
         head = write_journal(journal_dir)

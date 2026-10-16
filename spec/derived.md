@@ -100,15 +100,17 @@ One text artifact per period, where a period is an explicit inclusive
 date range `start..end` (civil dates, view grouping rules) — no ISO week
 numbers, no timezone inference beyond the entries' own offsets.
 
-The **on-disk artifact** is a machine header (the head binding is the
-staleness check) followed by the display body:
+The **on-disk artifact** is a machine header (version, the head binding is
+the staleness check) followed by the display body:
 
 ```
-# zephyr-digest: period=2026-01-05..2026-01-11 range=seq 12..30 head=<64-hex>
+# zephyr-digest: v2 period=2026-01-05..2026-01-11 range=seq 12..30 head=<64-hex>
 2026-01-05 – 2026-01-11 · 15 entries (3 redacted)
 
-tags  work 4, home 2, zephyr 2          # count desc, then name asc
-top words  zephyr 6, anchor 4           # count desc, then word asc, 10 max
+tags  work 4, home 2, zephyr 2           # count desc, then name asc
+top words  zephyr 6, anchor 4            # count desc, then word asc, 10 max
+activity  2026-01-05 1, 2026-01-06 0, 2026-01-07 2, …
+people and places  Alice, Berlin         # names only
 ```
 
 The **display body** — everything after the header — is what `zephyr recap`
@@ -119,6 +121,8 @@ and `get_digest` render and what `get_context` embeds:
 
 tags  work 4, home 2, zephyr 2
 top words  zephyr 6, anchor 4
+activity  2026-01-05 1, 2026-01-06 0, 2026-01-07 2, …
+people and places  Alice, Berlin
 ```
 
 - Line 1: the period (civil dates joined by ` – `, U+2013), a `·`, the entry
@@ -128,17 +132,47 @@ top words  zephyr 6, anchor 4
 - `tags`: one `name count` pair per distinct tag (count = entries carrying
   it), count desc then name asc.
 - `top words`: **token counts over the period's own entries** (the shared
-  tokenizer; the index is not consulted, since it stores seqs, not counts),
-  count desc then word asc, **at most 10**.
-- The tag and word lines follow the count line after one blank line; a line
-  is absent when it has no items. No entry text — the entries themselves
-  come from `get_entries`/the view when needed.
-- The header carries the provenance triple (period, seq range of the entries
-  it covers, head at build). `recap` and `get_context` serve the stored
-  artifact when fresh, regenerate when stale; the display never shows the
-  header.
-- Bounded: one line per tag (the format already bounds tags per entry) plus
-  at most 10 word lines.
+  tokenizer minus the digest stopwords below; the index is not consulted,
+  since it stores seqs, not counts), count desc then word asc, **at most
+  10**. The line is absent when no token survives the stopword filter.
+- `activity`: the entries per day of the period — one `YYYY-MM-DD N` pair
+  per day in chronological order, zero days included — at most 14 pairs,
+  then a `, … N more days` note (U+2026; singular `… 1 more day`) when the
+  period holds more than 14 days.
+- `people and places`: the period's kind-1 entities (the section-4 phrase
+  extraction run over the period's non-redacted entries; count = entries of
+  the period containing the entity), 5 max, count desc then name asc, names
+  only.
+- The lines follow the count line after one blank line, in the order
+  `tags`, `top words`, `activity`, `people and places`; a line is absent
+  when it has no items (`activity` is always present when the period has
+  entries). No entry text — the entries themselves come from
+  `get_entries`/the view when needed.
+- The header carries the format version (2) and the provenance triple
+  (period, seq range of the entries it covers, head at build). An artifact
+  with a foreign version is stale-by-version: `loadFresh` rejects it and the
+  next read transparently rebuilds it (section 2). `recap` and `get_context`
+  serve the stored artifact when fresh, regenerate when stale; the display
+  never shows the header.
+- Bounded: one line per tag (the format already bounds tags per entry), at
+  most 10 word pairs, at most 14 activity pairs, at most 5 place names.
+
+**Stopwords.** The `top words` filter is a closed list of common English
+function words — the glue of sentences, no topical meaning. Both
+implementations (Zig and the Python gate) take the list from the block
+below; any change to it is a format change. The filter affects `top words`
+counting only: the index, `search`, and the `ask` question stopword list are
+untouched.
+
+STOPWORDS:
+```
+the a this that these those my our your its
+i me we us you he she it they them
+be am is are was were been being do does
+have has had will would should could may must
+and or but so if then than not no all
+in on at to of for with by from as
+```
 
 ## 6. Profile
 
@@ -150,11 +184,15 @@ and like all derived data it is a pure function of the verified log.
 artifact: a version header, then the display body:
 
 ```
-# zephyr-profile: v2 range=seq 0..120 head=<64-hex>
+# zephyr-profile: v3 range=seq 0..120 head=<64-hex>
 121 entries · 2026-01-01 onward (2 redacted)
 
 most active        2026-02
-tags               work, zephyr, home
+weekday            Mon
+time of day        evening
+streak             3 days
+avg words          41
+tags               work 2, zephyr 1, home 1
 people and places  Alice, Berlin
 ```
 
@@ -165,20 +203,39 @@ profile` and `get_profile` render:
 121 entries · 2026-01-01 onward (2 redacted)
 
 most active        2026-02
-tags               work, zephyr, home
+weekday            Mon
+time of day        evening
+streak             3 days
+avg words          41
+tags               work 2, zephyr 1, home 1
 people and places  Alice, Berlin
 ```
 
-- `v` is the profile format version (2); `range` spans the journal's seqs
+- `v` is the profile format version (3); `range` spans the journal's seqs
   (`none` for an empty journal).
 - Line 1: the entry count in singular/plural, a `·`, the first entry's date,
   ` onward`, and ` (R redacted)` when redacted entries exist.
 - The stats block follows after one blank line: `labels padded to the longest
-  label plus two spaces` (minimum width 2), one line per stat — `most active`
-  (the fullest month, earliest wins ties), `tags` (kind-0 entities, top 10,
-  count desc then name asc), `people and places` (kind-1 entities, top 10).
-  Entity names only, no per-entity counts; an empty stat renders `—`
-  (U+2014). An empty journal body is `0 entries` (no stats block).
+  label plus two spaces` (minimum width 2), one line per stat:
+  - `most active` — the fullest month (earliest month wins ties).
+  - `weekday` — the fullest day of week (3-letter names; ties win to the
+    earlier weekday, Monday first). Redacted entries count: the stat is over
+    the entries' days, not their text.
+  - `time of day` — the fullest local-time band of the entries' wall-clock
+    hour (per-entry tz offset): morning 05–12, afternoon 12–17, evening
+    17–23, night 23–05; ties win in that fixed order. Redacted entries
+    count.
+  - `streak` — the longest run of consecutive civil days with at least one
+    entry (`1 day` / `N days`). Redacted entries count.
+  - `avg words` — the total token count (shared tokenizer, length ≥ 2) over
+    the non-redacted entries divided by the total entry count, truncated to
+    an integer.
+  - `tags` — kind-0 entities, top 10, count desc then name asc, with counts
+    (`work 2, zephyr 1`).
+  - `people and places` — kind-1 entities, top 10, count desc then name
+    asc, names only.
+  An empty stat renders `—` (U+2014). An empty journal body is `0 entries`
+  (no stats block).
 - **Presentation** (`zephyr profile`, `get_profile`): when `notes.md`
   exists, the notes come first — `notes`, the file's content verbatim with
   each line indented two spaces, a blank line, `about you`, the display body
@@ -195,12 +252,13 @@ people and places  Alice, Berlin
   its place. A user's hand-written profile is never destroyed — it becomes
   their notes. The notes presentation is never written into `notes.md`. The
   move happens once, is atomic (temp + rename), and is idempotent: a file
-  starting with the v1 or the v2 version header is treated as versioned and
-  left alone. A v1 file is not legacy — it is simply stale: `loadFresh`
-  requires the v2 prefix, so the next read rewrites it as v2 without
-  migrating. The MCP server never migrates: it renders the derived profile
-  in memory and leaves the document in place until a CLI read rewrites or
-  migrates it.
+  starting with the v1, the v2, or the v3 version header is treated as
+  versioned and left alone. A v1 or v2 file is not legacy — it is simply
+  stale: `loadFresh` requires the v3 prefix, so the next read rewrites it in
+  place as v3 without migrating (the v1 and v2 artifacts are machine-
+  derived; user voice lives in `notes.md`). The MCP server never migrates:
+  it renders the derived profile in memory and leaves the document in place
+  until a CLI read rewrites or migrates it.
 
 ## 7. Commands and MCP
 

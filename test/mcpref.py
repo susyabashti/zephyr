@@ -268,7 +268,11 @@ def run_gate(binary):
         resp, text = call(c, "get_profile")
         expect("3 entries \u00b7 2026-01-01 onward (1 redacted)" in text, f"get_profile: {text!r}")
         expect("most active        2026-01" in text, f"get_profile: {text!r}")
-        expect("tags               work" in text, f"get_profile: {text!r}")
+        expect("weekday            Thu" in text, f"get_profile: {text!r}")
+        expect("time of day        night" in text, f"get_profile: {text!r}")
+        expect("streak             1 day" in text, f"get_profile: {text!r}")
+        expect("avg words          2" in text, f"get_profile: {text!r}")
+        expect("tags               work 1" in text, f"get_profile: {text!r}")
         expect("people and places  \u2014" in text, f"get_profile: {text!r}")
         expect("# zephyr:" not in text, f"get_profile: provenance: {text!r}")
         # With notes.md: the notes come first under `notes`, the body under

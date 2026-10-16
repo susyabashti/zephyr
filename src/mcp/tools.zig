@@ -53,7 +53,8 @@ const tools_all = [_]Tool{
     .{
         .name = "get_profile",
         .description = "The derived profile of the journal (entry count, most active month, " ++
-            "top tags, people and places) plus the user's notes when notes.md exists. " ++
+            "weekday, time of day, streak, average word count, top tags, people and places) " ++
+            "plus the user's notes when notes.md exists. " ++
             "Computed from the verified log; read-only.",
         .input_schema = "{\"type\":\"object\",\"properties\":{}}",
     },
