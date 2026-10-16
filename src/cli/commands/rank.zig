@@ -22,6 +22,7 @@ const embed_mod = @import("zephyr_embed");
 const errors = @import("../errors.zig");
 const args = @import("../args.zig");
 const output = @import("../output.zig");
+const pager = @import("../pager.zig");
 const cli_journal = @import("../journal.zig");
 const embed_helpers = @import("../embed_helpers.zig");
 
@@ -47,6 +48,7 @@ pub fn run(
     environ_map: *const std.process.Environ.Map,
     path: []const u8,
     rest: []const []const u8,
+    no_pager: bool,
 ) errors.RunError!void {
     var mode: Mode = .hybrid;
     var top: usize = DefaultTop;
@@ -90,7 +92,7 @@ pub fn run(
         // Keyword mode never touches the model or the artifact.
         const kw = try embed.keywordHits(arena, &visible, question);
         defer arena.free(kw);
-        return renderHits(arena, io, style, out, &by_seq, kw[0..@min(top, kw.len)]);
+        return renderHits(arena, io, style, out, environ_map, path, no_pager, &by_seq, kw[0..@min(top, kw.len)]);
     }
 
     // Vector and hybrid: the fresh artifact, or a clean, actionable error.
@@ -126,7 +128,7 @@ pub fn run(
     const vec = try embed.cosineTopN(arena, store.seqs, store.vectors, store.dim, qvec, store.seqs.len);
     defer arena.free(vec);
     if (mode == .vector) {
-        return renderHits(arena, io, style, out, &by_seq, vec[0..@min(top, vec.len)]);
+        return renderHits(arena, io, style, out, environ_map, path, no_pager, &by_seq, vec[0..@min(top, vec.len)]);
     }
 
     // Hybrid: RRF of the two ranked lists, then top-N.
@@ -138,7 +140,7 @@ pub fn run(
     defer arena.free(vec_seqs);
     const fused = try embed.rrfFusion(arena, kw_seqs, vec_seqs);
     defer arena.free(fused);
-    return renderHits(arena, io, style, out, &by_seq, fused[0..@min(top, fused.len)]);
+    return renderHits(arena, io, style, out, environ_map, path, no_pager, &by_seq, fused[0..@min(top, fused.len)]);
 }
 
 /// One line per hit, in rank order — the bare seq, the date and local
@@ -153,12 +155,17 @@ fn renderHits(
     io: Io,
     style: output.Style,
     out: File,
+    environ_map: *const std.process.Environ.Map,
+    data_dir: []const u8,
+    no_pager: bool,
     by_seq: *const std.array_hash_map.Auto(u64, *const view.ViewEntry),
     hits: []const embed.RankHit,
 ) errors.RunError!void {
     var seq_buf: [20]u8 = undefined; // u64 decimal
     var date_buf: [16]u8 = undefined;
     var score_buf: [32]u8 = undefined;
+    var lines = std.ArrayList(u8).empty;
+    errdefer lines.deinit(arena);
     for (hits) |hit| {
         const e = by_seq.get(hit.seq) orelse continue;
         const date = view.civilDate(e.day) catch return error.TimestampOutOfRange;
@@ -186,8 +193,12 @@ fn renderHits(
             tail,
             try style.dim(arena, score),
         });
-        try output.printLine(out, io, line);
+        try lines.appendSlice(arena, line);
+        try lines.append(arena, '\n');
     }
+    // One render, so the pager can page it (the bytes are the same as the
+    // line-by-line printLine of before).
+    try pager.show(out, io, environ_map, data_dir, no_pager, try lines.toOwnedSlice(arena));
 }
 
 fn parseMode(s: []const u8) ?Mode {
