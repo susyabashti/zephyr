@@ -318,30 +318,63 @@ pub fn weekStart(day: i64) i64 {
     return day - @as(i64, @mod(day + 3, 7));
 }
 
-/// Unix epoch day 0 (1970-01-01) was a Thursday.
-pub fn weekdayName(days: i64) []const u8 {
-    const names = [_][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
-    const index: usize = @intCast(@rem(3 + days, 7));
-    return names[index];
+/// Monday-first weekday names (index 0 = Monday).
+pub const Weekdays = [_][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
+
+/// The Monday-first weekday index (0 = Monday) of `days`: Unix epoch day 0
+/// (1970-01-01) was a Thursday.
+pub fn weekdayIndex(days: i64) u8 {
+    return @intCast(@rem(3 + days, 7));
 }
 
-/// Local HH:MM of a timestamp under a fixed minute offset.
-pub fn timeString(ts_ms: u64, tz_offset_min: i16) [5]u8 {
+pub fn weekdayName(days: i64) []const u8 {
+    return Weekdays[weekdayIndex(days)];
+}
+
+/// The local wall-clock hour (0-23) of a timestamp under a fixed minute
+/// offset.
+pub fn hourOf(ts_ms: u64, tz_offset_min: i16) u32 {
     // render() rejects out-of-range timestamps via localDay before calling this.
     if (ts_ms > std.math.maxInt(i64)) unreachable;
     const ts: i64 = @intCast(ts_ms);
     const local_ms: i64 = ts + @as(i64, tz_offset_min) * 60_000;
     var secs_of_day: i64 = @rem(@divFloor(local_ms, 1000), 86_400);
     if (secs_of_day < 0) secs_of_day += 86_400;
+    return @intCast(@divTrunc(secs_of_day, 3600));
+}
+
+/// The local time band of an hour (spec/derived.md section 6): 0 morning
+/// 05–12, 1 afternoon 12–17, 2 evening 17–23, 3 night 23–05.
+pub fn timeBand(hour: u32) u32 {
+    if (hour >= 23 or hour < 5) return 3;
+    if (hour < 12) return 0;
+    if (hour < 17) return 1;
+    return 2;
+}
+
+/// Local HH:MM of a timestamp under a fixed minute offset.
+pub fn timeString(ts_ms: u64, tz_offset_min: i16) [5]u8 {
     // Format through unsigned types: 0.17 fmt prefixes a '+' on positive
     // signed ints when a width is given.
-    const hh: u32 = @intCast(@divTrunc(secs_of_day, 3600));
-    const mm: u32 = @intCast(@divTrunc(@rem(secs_of_day, 3600), 60));
+    const hh: u32 = hourOf(ts_ms, tz_offset_min);
+    const mm: u32 = @intCast(@divTrunc(@rem(secsOfDay(ts_ms, tz_offset_min), 3600), 60));
     var buf: [5]u8 = undefined;
     const s = std.fmt.bufPrint(&buf, "{d:0>2}:{d:0>2}", .{ hh, mm }) catch unreachable;
     var ret: [5]u8 = undefined;
     @memcpy(&ret, s);
     return ret;
+}
+
+/// Local seconds-of-day (0-86399) of a timestamp under a fixed minute
+/// offset.
+fn secsOfDay(ts_ms: u64, tz_offset_min: i16) i64 {
+    // render() rejects out-of-range timestamps via localDay before calling this.
+    if (ts_ms > std.math.maxInt(i64)) unreachable;
+    const ts: i64 = @intCast(ts_ms);
+    const local_ms: i64 = ts + @as(i64, tz_offset_min) * 60_000;
+    var secs_of_day: i64 = @rem(@divFloor(local_ms, 1000), 86_400);
+    if (secs_of_day < 0) secs_of_day += 86_400;
+    return secs_of_day;
 }
 
 test "empty journal renders empty" {

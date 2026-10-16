@@ -126,7 +126,7 @@ See [docs/features.md](docs/features.md) for what each one does and how it behav
 │   ├── index.zdi               # search index
 │   ├── embed.zde               # vector artifact (ZDE1), Phase 8
 │   └── digests/…digest         # period digests
-├── profile.md                  # derived profile (v2)
+├── profile.md                  # derived profile (v3)
 ├── notes.md                    # your notes; zephyr never rewrites it
 └── zephyr-key                  # 32-byte checkpoint seed, 0600
                                 # (created on first checkpoint)

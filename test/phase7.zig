@@ -387,8 +387,8 @@ test "phase 7: legacy profile migrates to notes exactly once" {
     try std.testing.expectEqualStrings(try allocator.print("{s}\n{s}", .{ existing, legacy }), gnotes);
 
     // A v1-header profile.md is stale, never legacy (spec/derived.md
-    // section 6): the next persisting read rewrites it as v2 without
-    // migrating its machine text into notes.md.
+    // section 6): the next persisting read rewrites it with the current
+    // header without migrating its machine text into notes.md.
     var h = try Fixture.init(allocator, io, ".tmp-phase7-h");
     defer h.deinit(allocator);
     try fillFixture(allocator, h.journal);
@@ -412,6 +412,32 @@ test "phase 7: legacy profile migrates to notes exactly once" {
     const hprofile = (try readArtifact(allocator, h.journal, dstore.ProfileFile)).?;
     defer allocator.free(hprofile);
     try std.testing.expect(std.mem.startsWith(u8, hprofile, dstore.ProfileHeader));
+
+    // A v2-header profile.md is likewise versioned, not legacy: rewritten
+    // with the current header, notes.md untouched.
+    var i = try Fixture.init(allocator, io, ".tmp-phase7-i");
+    defer i.deinit(allocator);
+    try fillFixture(allocator, i.journal);
+    try writeArtifact(i.journal.dir, io, dstore.NotesFile, "sentinel notes v2\n");
+    try writeArtifact(
+        i.journal.dir,
+        io,
+        dstore.ProfileFile,
+        "# zephyr-profile: v2 range=none head=" ++
+            "0000000000000000000000000000000000000000000000000000000000000000\n" ++
+            "0 entries\n",
+    );
+    var iv = try visibleOf(allocator, i.journal);
+    defer iv.recs.deinit();
+    defer iv.visible.deinit();
+    const iout = try dstore.profileWithNotes(allocator, i.journal, &iv.visible, iv.result);
+    defer allocator.free(iout);
+    const inotes = (try readArtifact(allocator, i.journal, dstore.NotesFile)).?;
+    defer allocator.free(inotes);
+    try std.testing.expectEqualStrings("sentinel notes v2\n", inotes);
+    const iprofile = (try readArtifact(allocator, i.journal, dstore.ProfileFile)).?;
+    defer allocator.free(iprofile);
+    try std.testing.expect(std.mem.startsWith(u8, iprofile, dstore.ProfileHeader));
 }
 
 test "phase 7: status reports states; rebuild restores; notes untouched" {

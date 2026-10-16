@@ -521,15 +521,51 @@ fn readU32be(b: []const u8) ?u32 {
 
 pub const DigestError = Allocator.Error || error{TimestampOutOfRange};
 
+/// The digest's `top words` stopword list (spec/derived.md section 5):
+/// a closed set of common English function words. Both implementations (Zig
+/// and the Python gate) take it from the spec text; this const must match
+/// it word for word. Affects `top words` counting only — the index,
+/// `search`, and the `ask` question stopword list are untouched.
+const DigestStopwords = [_][]const u8{
+    "the",  "a",   "this", "that", "these", "those",  "my",    "our",   "your", "its",
+    "i",    "me",  "we",   "us",   "you",   "he",     "she",   "it",    "they", "them",
+    "be",   "am",  "is",   "are",  "was",   "were",   "been",  "being", "do",   "does",
+    "have", "has", "had",  "will", "would", "should", "could", "may",   "must", "and",
+    "or",   "but", "so",   "if",   "then",  "than",   "not",   "no",    "all",  "in",
+    "on",   "at",  "to",   "of",   "for",   "with",   "by",    "from",  "as",
+};
+
+comptime {
+    // The spec pins the list: 59 words, no duplicates.
+    @setEvalBranchQuota(32_768);
+    if (DigestStopwords.len != 59) @compileError("digest stopword list must hold 59 words (spec/derived.md section 5)");
+    for (DigestStopwords, 0..) |a, i| {
+        for (DigestStopwords[i + 1 ..]) |b| {
+            if (std.mem.eql(u8, a, b)) @compileError("duplicate digest stopword: " ++ a);
+        }
+    }
+}
+
+fn isDigestStopword(w: []const u8) bool {
+    for (DigestStopwords) |s| {
+        if (std.mem.eql(u8, w, s)) return true;
+    }
+    return false;
+}
+
 /// The period's histograms: tag counts (tag bytes borrow from the payloads)
-/// and word counts (owned bytes), both sorted count desc then name asc.
+/// and word counts (owned bytes), both sorted count desc then name asc,
+/// plus the in-range entries' days (ascending) and the period's top-5
+/// kind-1 entities (owned names).
 const DigestStats = struct {
     n: usize,
     redacted: usize,
     min_seq: u64,
     max_seq: u64,
-    tags: []TagCount,
-    words: []TagCount,
+    tags: []const TagCount,
+    words: []const TagCount,
+    days: []const i64,
+    places: []const TagCount,
     allocator: Allocator,
 
     fn deinit(self: DigestStats) void {
@@ -537,6 +573,9 @@ const DigestStats = struct {
         allocator.free(self.tags);
         for (self.words) |wc| allocator.free(wc.tag);
         allocator.free(self.words);
+        allocator.free(self.days);
+        for (self.places) |pc| allocator.free(pc.tag);
+        allocator.free(self.places);
     }
 };
 
@@ -556,6 +595,10 @@ fn digestStats(allocator: Allocator, visible: *const view.Visible, range: view.D
         for (word_counts.items) |wc| allocator.free(wc.tag);
         allocator.free(word_counts.items);
     }
+    var days = std.ArrayList(i64).empty;
+    errdefer days.deinit(allocator);
+    var place_pairs = std.ArrayList(EntPair).empty; // names borrow from the payloads
+    errdefer allocator.free(place_pairs.items);
     var n: usize = 0;
     var redacted: usize = 0;
     var min_seq: u64 = std.math.maxInt(u64);
@@ -563,6 +606,7 @@ fn digestStats(allocator: Allocator, visible: *const view.Visible, range: view.D
     for (visible.entries) |e| {
         if (e.day < range.start or e.day >= range.end) continue;
         n += 1;
+        try days.append(allocator, e.day);
         if (e.redacted) {
             redacted += 1;
         } else {
@@ -571,7 +615,32 @@ fn digestStats(allocator: Allocator, visible: *const view.Visible, range: view.D
             defer allocator.free(sp);
             for (sp) |s| {
                 if (s.end - s.start < 2) continue;
-                try word_toks.append(allocator, try tokens.lowercase(allocator, e.text, s));
+                const low = try tokens.lowercase(allocator, e.text, s);
+                if (isDigestStopword(low)) {
+                    allocator.free(low); // stopword: not a top word
+                    continue;
+                }
+                try word_toks.append(allocator, low);
+            }
+            // The period's kind-1 entities, one count per distinct name per
+            // entry (the index is not consulted; spec/derived.md section 5).
+            const runs = try phraseRuns(allocator, e.text, sp);
+            defer allocator.free(runs);
+            if (runs.len > 1) {
+                var entry_runs = std.ArrayList([]const u8).empty;
+                defer entry_runs.deinit(allocator);
+                for (runs) |r| try entry_runs.append(allocator, r);
+                std.mem.sort([]const u8, entry_runs.items, {}, tokenLessThan);
+                for (entry_runs.items, 0..) |r, i| {
+                    if (i > 0 and std.mem.eql(u8, entry_runs.items[i - 1], r)) continue;
+                    if (r.len <= MaxNameLen) {
+                        try place_pairs.append(allocator, .{ .name = r, .kind = .phrase, .seq = @intCast(e.seq) });
+                    }
+                }
+            } else if (runs.len == 1) {
+                if (runs[0].len <= MaxNameLen) {
+                    try place_pairs.append(allocator, .{ .name = runs[0], .kind = .phrase, .seq = @intCast(e.seq) });
+                }
             }
         }
         min_seq = @min(min_seq, e.seq);
@@ -604,20 +673,59 @@ fn digestStats(allocator: Allocator, visible: *const view.Visible, range: view.D
     }
     std.mem.sort(TagCount, counts.items, {}, tagCountLessThan);
     std.mem.sort(TagCount, word_counts.items, {}, tagCountLessThan);
+    // Places: group (name, seq) pairs sorted by name then seq; count = the
+    // distinct entries carrying the name. The names are duped (they borrow
+    // from the entry texts, which do not outlive this call).
+    std.mem.sort(EntPair, place_pairs.items, {}, entPairLessThan);
+    var place_counts = std.ArrayList(TagCount).empty;
+    errdefer {
+        for (place_counts.items) |pc| allocator.free(pc.tag);
+        allocator.free(place_counts.items);
+    }
+    i = 0;
+    while (i < place_pairs.items.len) {
+        const name = place_pairs.items[i].name;
+        var count: u32 = 0;
+        var last: ?u32 = null;
+        var j = i;
+        while (j < place_pairs.items.len and std.mem.eql(u8, place_pairs.items[j].name, name)) {
+            const s = place_pairs.items[j].seq;
+            if (last != s) {
+                count += 1;
+                last = s;
+            }
+            j += 1;
+        }
+        const owned = try allocator.dupe(u8, name);
+        errdefer allocator.free(owned);
+        try place_counts.append(allocator, .{ .tag = owned, .count = count });
+        i = j;
+    }
+    std.mem.sort(TagCount, place_counts.items, {}, tagCountLessThan);
     const tags = try allocator.alloc(TagCount, counts.items.len);
     errdefer allocator.free(tags);
     const words = try allocator.alloc(TagCount, word_counts.items.len);
     errdefer allocator.free(words);
+    const days_owned = try days.toOwnedSlice(allocator);
+    errdefer allocator.free(days_owned);
+    const top_places = place_counts.items[0..@min(5, place_counts.items.len)];
+    const places = try allocator.alloc(TagCount, top_places.len);
+    errdefer allocator.free(places);
     @memcpy(tags, counts.items);
     @memcpy(words, word_counts.items);
+    @memcpy(places, top_places);
     // Success: nothing fallible follows; the grouping buffers are freed
     // explicitly (the errdefers are error-path only). The owned word bytes
-    // live on in `words` and are freed by DigestStats.deinit.
+    // live on in `words`, the place names in `places`, and both are freed
+    // by DigestStats.deinit.
     counts.deinit(allocator);
     word_counts.deinit(allocator);
     tag_pairs.deinit(allocator);
     for (word_toks.items) |t| allocator.free(t);
     allocator.free(word_toks.items);
+    allocator.free(place_pairs.items); // names borrow from the payloads
+    for (place_counts.items[top_places.len..]) |pc| allocator.free(pc.tag);
+    allocator.free(place_counts.items);
     return DigestStats{
         .n = n,
         .redacted = redacted,
@@ -625,16 +733,22 @@ fn digestStats(allocator: Allocator, visible: *const view.Visible, range: view.D
         .max_seq = max_seq,
         .tags = tags,
         .words = words,
+        .days = days_owned,
+        .places = places,
         .allocator = allocator,
     };
 }
 
 /// The digest display body (spec/derived.md section 5): the period line
-/// (` – `, U+2013), a blank line, then the tag histogram and the top words
-/// (cap 10); an empty period renders the period line alone.
-fn renderDigestBodyFromStats(allocator: Allocator, stats: *const DigestStats, d0: view.CivilDate, d1: view.CivilDate) DigestError![]u8 {
+/// (` – `, U+2013), a blank line, then `tags`, `top words` (stopword-
+/// filtered, cap 10), `activity` (one pair per day of the period, cap 14
+/// with a more-days note), and `people and places` (cap 5); an empty
+/// period renders the period line alone.
+fn renderDigestBodyFromStats(allocator: Allocator, stats: *const DigestStats, range: view.DayRange) DigestError![]u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
+    const d0 = view.civilDate(range.start) catch return error.TimestampOutOfRange;
+    const d1 = view.civilDate(range.end - 1) catch return error.TimestampOutOfRange;
     try line(allocator, &out, "{d:0>4}-{d:0>2}-{d:0>2} \u{2013} {d:0>4}-{d:0>2}-{d:0>2} \u{B7} {d} {s}", .{
         d0.year, d0.month, d0.day, d1.year, d1.month, d1.day, stats.n, view.countNoun(stats.n, "entry", "entries"),
     });
@@ -643,8 +757,12 @@ fn renderDigestBodyFromStats(allocator: Allocator, stats: *const DigestStats, d0
     }
     try out.append(allocator, '\n');
     if (stats.n > 0) {
+        var first_line = true; // one blank line before the first stat line
         if (stats.tags.len > 0) {
-            try out.append(allocator, '\n'); // blank line before the tag/word lines
+            if (first_line) {
+                try out.append(allocator, '\n');
+                first_line = false;
+            }
             try out.appendSlice(allocator, "tags  ");
             for (stats.tags, 0..) |tc, idx| {
                 if (idx > 0) try out.appendSlice(allocator, ", ");
@@ -653,12 +771,56 @@ fn renderDigestBodyFromStats(allocator: Allocator, stats: *const DigestStats, d0
             try out.append(allocator, '\n');
         }
         if (stats.words.len > 0) {
-            if (stats.tags.len == 0) try out.append(allocator, '\n');
+            if (first_line) {
+                try out.append(allocator, '\n');
+                first_line = false;
+            }
             const top = stats.words[0..@min(10, stats.words.len)];
             try out.appendSlice(allocator, "top words  ");
             for (top, 0..) |tc, idx| {
                 if (idx > 0) try out.appendSlice(allocator, ", ");
                 try line(allocator, &out, "{s} {d}", .{ tc.tag, tc.count });
+            }
+            try out.append(allocator, '\n');
+        }
+        // Activity: one pair per day of the period, at most 14, then a note.
+        // stats.days is ascending, so a single pointer walk covers it.
+        const n_days: i64 = range.end - range.start;
+        const shown: i64 = @min(14, n_days);
+        if (first_line) {
+            try out.append(allocator, '\n');
+            first_line = false;
+        }
+        try out.appendSlice(allocator, "activity  ");
+        var ptr: usize = 0;
+        var first_pair = true;
+        var d: i64 = range.start;
+        while (d < range.start + shown) : (d += 1) {
+            while (ptr < stats.days.len and stats.days[ptr] < d) ptr += 1;
+            var c: u32 = 0;
+            while (ptr < stats.days.len and stats.days[ptr] == d) {
+                c += 1;
+                ptr += 1;
+            }
+            if (!first_pair) try out.appendSlice(allocator, ", ");
+            first_pair = false;
+            const cd = view.civilDate(d) catch return error.TimestampOutOfRange;
+            try line(allocator, &out, "{d:0>4}-{d:0>2}-{d:0>2} {d}", .{ cd.year, cd.month, cd.day, c });
+        }
+        if (n_days > 14) {
+            const more = @as(u64, @intCast(n_days - 14));
+            try line(allocator, &out, ", \u{2026} {d} more {s}", .{ more, view.countNoun(more, "day", "days") });
+        }
+        try out.append(allocator, '\n');
+        if (stats.places.len > 0) {
+            if (first_line) {
+                try out.append(allocator, '\n');
+                first_line = false;
+            }
+            try out.appendSlice(allocator, "people and places  ");
+            for (stats.places, 0..) |tc, idx| {
+                if (idx > 0) try out.appendSlice(allocator, ", ");
+                try line(allocator, &out, "{s}", .{tc.tag});
             }
             try out.append(allocator, '\n');
         }
@@ -670,14 +832,12 @@ fn renderDigestBodyFromStats(allocator: Allocator, stats: *const DigestStats, d0
 pub fn renderDigestBody(allocator: Allocator, visible: *const view.Visible, range: view.DayRange) DigestError![]u8 {
     const stats = try digestStats(allocator, visible, range);
     defer stats.deinit();
-    const d0 = view.civilDate(range.start) catch return error.TimestampOutOfRange;
-    const d1 = view.civilDate(range.end - 1) catch return error.TimestampOutOfRange;
-    return renderDigestBodyFromStats(allocator, &stats, d0, d1);
+    return renderDigestBodyFromStats(allocator, &stats, range);
 }
 
 /// Renders the digest artifact for `range` (spec/derived.md section 5): the
-/// machine header (period, seq range of the entries it covers, head at
-/// build) followed by the display body.
+/// machine header (format v2, period, seq range of the entries it covers,
+/// head at build) followed by the display body.
 pub fn renderDigest(
     allocator: Allocator,
     visible: *const view.Visible,
@@ -690,11 +850,11 @@ pub fn renderDigest(
     const d1 = view.civilDate(range.end - 1) catch return error.TimestampOutOfRange;
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
-    try line(allocator, &out, "# zephyr-digest: period={d:0>4}-{d:0>2}-{d:0>2}..{d:0>4}-{d:0>2}-{d:0>2} range=seq {d}..{d} head={s}\n", .{
+    try line(allocator, &out, "# zephyr-digest: v2 period={d:0>4}-{d:0>2}-{d:0>2}..{d:0>4}-{d:0>2}-{d:0>2} range=seq {d}..{d} head={s}\n", .{
         d0.year,                               d0.month,                              d0.day,                         d1.year, d1.month, d1.day,
         if (stats.n > 0) stats.min_seq else 0, if (stats.n > 0) stats.max_seq else 0, try hexLower(allocator, &head),
     });
-    const body = try renderDigestBodyFromStats(allocator, &stats, d0, d1);
+    const body = try renderDigestBodyFromStats(allocator, &stats, range);
     defer allocator.free(body);
     try out.appendSlice(allocator, body);
     return out.toOwnedSlice(allocator);
@@ -771,6 +931,101 @@ fn bestMonth(allocator: Allocator, visible: *const view.Visible) ProfileError!?M
     return result;
 }
 
+/// The fullest weekday (ties win to the earlier weekday, Monday first), or
+/// null when empty. Redacted entries count — the stat is over the entries'
+/// days, not their text (spec/derived.md section 6).
+fn bestWeekday(visible: *const view.Visible) ?u8 {
+    if (visible.entries.len == 0) return null;
+    var counts = std.mem.zeroes([7]u32);
+    for (visible.entries) |e| {
+        counts[view.weekdayIndex(e.day)] += 1;
+    }
+    var best: u8 = 0;
+    for (counts, 0..) |c, i| {
+        if (c > counts[best]) best = @intCast(i); // strict >: the earlier weekday wins ties
+    }
+    return best;
+}
+
+/// The fullest local-time band (ties win in the fixed order morning,
+/// afternoon, evening, night), or null when empty. Redacted entries count.
+fn bestTimeBand(visible: *const view.Visible) ?u32 {
+    if (visible.entries.len == 0) return null;
+    var counts = std.mem.zeroes([4]u32);
+    for (visible.entries) |e| {
+        counts[view.timeBand(view.hourOf(e.ts_ms, e.tz_offset_min))] += 1;
+    }
+    var best: u32 = 0;
+    for (counts, 0..) |c, i| {
+        if (c > counts[best]) best = @intCast(i); // strict >: the fixed band order wins ties
+    }
+    return best;
+}
+
+/// The longest run of consecutive civil days with at least one visible
+/// entry; 0 for an empty journal. Redacted entries count. The entries are
+/// sorted by day (view order), so one pass suffices.
+fn longestStreak(visible: *const view.Visible) u32 {
+    if (visible.entries.len == 0) return 0;
+    var best: u32 = 0;
+    var run: u32 = 0;
+    var prev: ?i64 = null;
+    for (visible.entries) |e| {
+        if (prev) |p| {
+            run = if (e.day == p + 1) run + 1 else if (e.day == p) run else 1;
+        } else {
+            run = 1;
+        }
+        if (run > best) best = run;
+        prev = e.day;
+    }
+    return best;
+}
+
+/// The total token count (shared tokenizer, length ≥ 2) over the
+/// non-redacted entries (spec/derived.md section 6).
+fn totalWords(allocator: Allocator, visible: *const view.Visible) Allocator.Error!u64 {
+    var total: u64 = 0;
+    for (visible.entries) |e| {
+        if (e.redacted) continue;
+        const sp = try tokens.spans(allocator, e.text);
+        defer allocator.free(sp);
+        for (sp) |s| {
+            if (s.end - s.start >= 2) total += 1;
+        }
+    }
+    return total;
+}
+
+/// The top-10 kind-0 entities with counts, `name count` pairs joined with
+/// ", " (count descending, then name ascending). The names borrow from
+/// `entities`; the caller frees the joined string. Null when `entities`
+/// holds none of the kind.
+fn entityTagPairs(allocator: Allocator, entities: []const Entity) Allocator.Error!?[]u8 {
+    var list = std.ArrayList(*const Entity).empty;
+    errdefer list.deinit(allocator);
+    for (entities) |*e| {
+        if (@backingInt(e.kind) == 0) try list.append(allocator, e);
+    }
+    if (list.items.len == 0) return null;
+    std.mem.sort(*const Entity, list.items, {}, entityCountLessThan);
+    var pairs = std.ArrayList([]const u8).empty;
+    errdefer pairs.deinit(allocator); // the pairs are owned copies
+    var joined: ?[]u8 = null;
+    errdefer if (joined) |s| allocator.free(s);
+    for (list.items[0..@min(10, list.items.len)]) |e| {
+        const pair = try std.fmt.allocPrint(allocator, "{s} {d}", .{ e.name, e.count });
+        errdefer allocator.free(pair);
+        try pairs.append(allocator, pair);
+    }
+    joined = try std.mem.join(allocator, ", ", pairs.items);
+    // Success: nothing fallible follows; free both buffers explicitly so
+    // the errdefers (error path only) don't double-free.
+    pairs.deinit(allocator);
+    list.deinit(allocator);
+    return @as(?[]u8, joined);
+}
+
 /// The top-10 entity names of `kind` (0 = tag, 1 = phrase) — count
 /// descending, then name ascending — joined with ", ". The names borrow
 /// from `entities`; the caller frees the joined string. Null when
@@ -815,10 +1070,10 @@ pub fn renderProfileBody(
 ) ProfileError![]u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
-    var tag_names: ?[]u8 = null;
+    var tag_pairs: ?[]u8 = null;
     var place_names: ?[]u8 = null;
     errdefer {
-        if (tag_names) |s| allocator.free(s);
+        if (tag_pairs) |s| allocator.free(s);
         if (place_names) |s| allocator.free(s);
     }
     const n: u64 = @intCast(visible.entries.len);
@@ -834,24 +1089,33 @@ pub fn renderProfileBody(
         if (r > 0) try line(allocator, &out, " ({d} redacted)", .{r});
         try out.append(allocator, '\n');
         try out.append(allocator, '\n'); // blank line before the stat block
-        tag_names = try entityNames(allocator, entities, 0);
+        tag_pairs = try entityTagPairs(allocator, entities);
         place_names = try entityNames(allocator, entities, 1);
-        // All three labels are always present, so the longest decides the
+        // All seven labels are always present, so the longest decides the
         // column width.
-        const width = @max("most active".len, @max("tags".len, "people and places".len)) + 2;
-        var buf: [16]u8 = undefined;
-        const month = std.fmt.bufPrint(&buf, "{d:0>4}-{d:0>2}", .{
+        const width = @max("most active".len, @max("time of day".len, "people and places".len)) + 2;
+        var vbuf: [24]u8 = undefined;
+        const month = std.fmt.bufPrint(&vbuf, "{d:0>4}-{d:0>2}", .{
             @as(u64, @intCast(@divTrunc(best.key, 12))), @as(u64, @intCast(@mod(best.key, 12))) + 1,
         }) catch unreachable;
         try statLine(allocator, &out, "most active", width, month);
-        try statLine(allocator, &out, "tags", width, tag_names orelse "\u{2014}");
+        try statLine(allocator, &out, "weekday", width, view.Weekdays[bestWeekday(visible).?]);
+        const bands = [_][]const u8{ "morning", "afternoon", "evening", "night" };
+        try statLine(allocator, &out, "time of day", width, bands[bestTimeBand(visible).?]);
+        const streak = longestStreak(visible);
+        const streak_v = std.fmt.bufPrint(&vbuf, "{d} {s}", .{ streak, view.countNoun(streak, "day", "days") }) catch unreachable;
+        try statLine(allocator, &out, "streak", width, streak_v);
+        const total = try totalWords(allocator, visible);
+        const avg_v = std.fmt.bufPrint(&vbuf, "{d}", .{(total / n)}) catch unreachable;
+        try statLine(allocator, &out, "avg words", width, avg_v);
+        try statLine(allocator, &out, "tags", width, tag_pairs orelse "\u{2014}");
         try statLine(allocator, &out, "people and places", width, place_names orelse "\u{2014}");
     }
     return out.toOwnedSlice(allocator);
 }
 
 /// Renders the profile artifact (spec/derived.md section 6): the machine
-/// header (format v2, the journal's seq range, head at build) followed by
+/// header (format v3, the journal's seq range, head at build) followed by
 /// the display body.
 pub fn renderProfile(
     allocator: Allocator,
@@ -865,9 +1129,9 @@ pub fn renderProfile(
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
     if (record_count > 0) {
-        try line(allocator, &out, "# zephyr-profile: v2 range=seq 0..{d} head={s}\n", .{ record_count - 1, head_hex });
+        try line(allocator, &out, "# zephyr-profile: v3 range=seq 0..{d} head={s}\n", .{ record_count - 1, head_hex });
     } else {
-        try line(allocator, &out, "# zephyr-profile: v2 range=none head={s}\n", .{head_hex});
+        try line(allocator, &out, "# zephyr-profile: v3 range=none head={s}\n", .{head_hex});
     }
     const body = try renderProfileBody(allocator, visible, entities);
     defer allocator.free(body);
@@ -1044,15 +1308,82 @@ test "digest: exact bytes for a fixed period" {
     const got = try renderDigest(allocator, &vis, range, HEAD);
     defer allocator.free(got);
     const want = try allocator.print(
-        "# zephyr-digest: period=2026-01-01..2026-01-01 range=seq 0..2 head={s}\n" ++
+        "# zephyr-digest: v2 period=2026-01-01..2026-01-01 range=seq 0..2 head={s}\n" ++
             "2026-01-01 \u{2013} 2026-01-01 \u{B7} 3 entries (1 redacted)\n" ++
             "\n" ++
             "tags  work 1\n" ++
-            "top words  the 2, auth 1, dog 1, fix 1, shipped 1, walked 1\n",
+            // "the" (x2) is a digest stopword and does not appear.
+            "top words  auth 1, dog 1, fix 1, shipped 1, walked 1\n" ++
+            "activity  2026-01-01 3\n",
         .{try hexLower(allocator, &HEAD)},
     );
     defer allocator.free(want);
     try std.testing.expectEqualStrings(want, got);
+}
+
+test "digest: top words absent when every token is a stopword" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const entries = [_]view.ViewEntry{.{
+        .seq = 0,
+        .ts_ms = 1_767_229_200_000,
+        .tz_offset_min = 0,
+        .day = D0,
+        .redacted = false,
+        .edited = false,
+        .text = "the and of to in",
+        .tags = &.{},
+    }};
+    const vis = try mkVisible(allocator, &entries);
+    defer vis.deinit();
+    const range = view.DayRange{ .start = D0, .end = D0 + 1 };
+    const got = try renderDigest(allocator, &vis, range, HEAD);
+    defer allocator.free(got);
+    const want = try allocator.print(
+        "# zephyr-digest: v2 period=2026-01-01..2026-01-01 range=seq 0..0 head={s}\n" ++
+            "2026-01-01 \u{2013} 2026-01-01 \u{B7} 1 entry\n" ++
+            "\n" ++
+            "activity  2026-01-01 1\n",
+        .{try hexLower(allocator, &HEAD)},
+    );
+    defer allocator.free(want);
+    try std.testing.expectEqualStrings(want, got);
+}
+
+test "digest: activity caps at 14 pairs with a more-days note" {
+    // Synthetic stats over a 20-day period: one entry on the first and one
+    // on the last day. The last entry is outside the shown window, so the
+    // note carries the remainder.
+    const allocator = std.testing.allocator;
+    const stats = DigestStats{
+        .n = 2,
+        .redacted = 0,
+        .min_seq = 0,
+        .max_seq = 1,
+        .tags = &.{},
+        .words = &.{},
+        .days = &[_]i64{ D0, D0 + 19 },
+        .places = &.{},
+        .allocator = allocator,
+    };
+    const range = view.DayRange{ .start = D0, .end = D0 + 20 };
+    const body = try renderDigestBodyFromStats(allocator, &stats, range);
+    defer allocator.free(body);
+    const want = try std.testing.allocator.print(
+        "2026-01-01 \u{2013} 2026-01-20 \u{B7} 2 entries\n" ++
+            "\n" ++
+            "activity  2026-01-01 1, " ++
+            "2026-01-02 0, 2026-01-03 0, 2026-01-04 0, 2026-01-05 0, " ++
+            "2026-01-06 0, 2026-01-07 0, 2026-01-08 0, 2026-01-09 0, " ++
+            "2026-01-10 0, 2026-01-11 0, 2026-01-12 0, 2026-01-13 0, " ++
+            "2026-01-14 0, \u{2026} 6 more days\n",
+        .{},
+    );
+    defer std.testing.allocator.free(want);
+    try std.testing.expectEqualStrings(want, body);
 }
 
 test "digest: empty period renders header and 0 entries" {
@@ -1067,7 +1398,7 @@ test "digest: empty period renders header and 0 entries" {
     const got = try renderDigest(allocator, &vis, range, HEAD);
     defer allocator.free(got);
     const want = try allocator.print(
-        "# zephyr-digest: period=2026-02-01..2026-02-01 range=seq 0..0 head={s}\n" ++
+        "# zephyr-digest: v2 period=2026-02-01..2026-02-01 range=seq 0..0 head={s}\n" ++
             "2026-02-01 \u{2013} 2026-02-01 \u{B7} 0 entries\n",
         .{try hexLower(allocator, &HEAD)},
     );
@@ -1087,12 +1418,18 @@ test "profile: exact bytes" {
     defer idx.deinit();
     const got = try renderProfile(allocator, &vis, idx.entities, 4, HEAD);
     defer allocator.free(got);
+    // Hours 1, 4 -> night, 7 -> morning, 2 -> night; days D0 (x3) and D1
+    // are not consecutive; 12 tokens over 4 entries.
     const want = try allocator.print(
-        "# zephyr-profile: v2 range=seq 0..3 head={s}\n" ++
+        "# zephyr-profile: v3 range=seq 0..3 head={s}\n" ++
             "4 entries \u{B7} 2026-01-01 onward (1 redacted)\n" ++
             "\n" ++
             "most active        2026-01\n" ++
-            "tags               Alice, work\n" ++
+            "weekday            Thu\n" ++
+            "time of day        night\n" ++
+            "streak             1 day\n" ++
+            "avg words          3\n" ++
+            "tags               Alice 1, work 1\n" ++
             "people and places  New York\n",
         .{try hexLower(allocator, &HEAD)},
     );
@@ -1112,8 +1449,60 @@ test "profile: empty journal" {
     const got = try renderProfile(allocator, &vis, &.{}, 0, genesis);
     defer allocator.free(got);
     const want = try allocator.print(
-        "# zephyr-profile: v2 range=none head={s}\n" ++ "0 entries\n",
+        "# zephyr-profile: v3 range=none head={s}\n" ++ "0 entries\n",
         .{try hexLower(allocator, &genesis)},
+    );
+    defer allocator.free(want);
+    try std.testing.expectEqualStrings(want, got);
+}
+
+test "profile: streak, weekday and band tie-breaks" {
+    // Thu 06:00 (morning) and Fri 23:00 (night): the weekday tie goes to
+    // the earlier weekday, the band tie to the fixed order, and the two
+    // consecutive days form a 2-day streak.
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const entries = [_]view.ViewEntry{
+        .{
+            .seq = 0,
+            .ts_ms = 1_767_247_200_000, // 2026-01-01T06:00Z
+            .tz_offset_min = 0,
+            .day = D0,
+            .redacted = false,
+            .edited = false,
+            .text = "one two three",
+            .tags = &.{},
+        },
+        .{
+            .seq = 1,
+            .ts_ms = 1_767_394_800_000, // 2026-01-02T23:00Z
+            .tz_offset_min = 0,
+            .day = D0 + 1,
+            .redacted = false,
+            .edited = false,
+            .text = "four five",
+            .tags = &.{},
+        },
+    };
+    const vis = try mkVisible(allocator, &entries);
+    defer vis.deinit();
+    const got = try renderProfile(allocator, &vis, &.{}, 2, HEAD);
+    defer allocator.free(got);
+    const want = try allocator.print(
+        "# zephyr-profile: v3 range=seq 0..1 head={s}\n" ++
+            "2 entries \u{B7} 2026-01-01 onward\n" ++
+            "\n" ++
+            "most active        2026-01\n" ++
+            "weekday            Thu\n" ++
+            "time of day        morning\n" ++
+            "streak             2 days\n" ++
+            "avg words          2\n" ++
+            "tags               \u{2014}\n" ++
+            "people and places  \u{2014}\n",
+        .{try hexLower(allocator, &HEAD)},
     );
     defer allocator.free(want);
     try std.testing.expectEqualStrings(want, got);
