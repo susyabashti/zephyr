@@ -67,6 +67,16 @@ pub const Style = struct {
         return self.wrap(allocator, "1", text);
     }
 
+    /// A section title of a derived surface (blue, bold).
+    pub fn title(self: Style, allocator: Allocator, text: []const u8) Allocator.Error![]const u8 {
+        return self.wrap(allocator, "1;34", text);
+    }
+
+    /// A frequency table's bar (soft green — a quiet level meter).
+    pub fn bar(self: Style, allocator: Allocator, text: []const u8) Allocator.Error![]const u8 {
+        return self.wrap(allocator, "2;32", text);
+    }
+
     /// Verdicts: fresh (green), stale (yellow), corrupt (red).
     pub fn good(self: Style, allocator: Allocator, text: []const u8) Allocator.Error![]const u8 {
         return self.wrap(allocator, "32", text);

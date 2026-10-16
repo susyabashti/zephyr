@@ -556,8 +556,10 @@ fn isDigestStopword(w: []const u8) bool {
 /// The period's histograms: tag counts (tag bytes borrow from the payloads)
 /// and word counts (owned bytes), both sorted count desc then name asc,
 /// plus the in-range entries' days (ascending) and the period's top-5
-/// kind-1 entities (owned names).
-const DigestStats = struct {
+/// kind-1 entities (owned names). The caller owns the stats: `deinit`
+/// frees the `tags`, `words`, `days`, and `places` slices and the owned
+/// word and place name bytes.
+pub const DigestStats = struct {
     n: usize,
     redacted: usize,
     min_seq: u64,
@@ -568,21 +570,22 @@ const DigestStats = struct {
     places: []const TagCount,
     allocator: Allocator,
 
-    fn deinit(self: DigestStats) void {
+    pub fn deinit(self: DigestStats) void {
         const allocator = self.allocator;
         allocator.free(self.tags);
-        for (self.words) |wc| allocator.free(wc.tag);
+        for (self.words) |wc| allocator.free(wc.name);
         allocator.free(self.words);
         allocator.free(self.days);
-        for (self.places) |pc| allocator.free(pc.tag);
+        for (self.places) |pc| allocator.free(pc.name);
         allocator.free(self.places);
     }
 };
 
 /// Computes the digest histograms for `range` (spec/derived.md section 5):
 /// the tag histogram counts distinct entries, top words count token
-/// occurrences over entry text. Pure in (visible, range).
-fn digestStats(allocator: Allocator, visible: *const view.Visible, range: view.DayRange) DigestError!DigestStats {
+/// occurrences over entry text. Pure in (visible, range). The caller owns
+/// the stats (`deinit`).
+pub fn digestStats(allocator: Allocator, visible: *const view.Visible, range: view.DayRange) DigestError!DigestStats {
     var tag_pairs = std.ArrayList(TagPair).empty;
     errdefer tag_pairs.deinit(allocator); // tag strings borrow from payloads
     var word_toks = std.ArrayList([]const u8).empty;
@@ -592,7 +595,7 @@ fn digestStats(allocator: Allocator, visible: *const view.Visible, range: view.D
     }
     var word_counts = std.ArrayList(TagCount).empty;
     errdefer {
-        for (word_counts.items) |wc| allocator.free(wc.tag);
+        for (word_counts.items) |wc| allocator.free(wc.name);
         allocator.free(word_counts.items);
     }
     var days = std.ArrayList(i64).empty;
@@ -656,7 +659,7 @@ fn digestStats(allocator: Allocator, visible: *const view.Visible, range: view.D
             while (j < word_toks.items.len and std.mem.eql(u8, word_toks.items[j], w)) j += 1;
             const owned_w = try allocator.dupe(u8, w);
             errdefer allocator.free(owned_w);
-            try word_counts.append(allocator, .{ .tag = owned_w, .count = @intCast(j - i) });
+            try word_counts.append(allocator, .{ .name = owned_w, .count = @intCast(j - i) });
             i = j;
         }
     }
@@ -668,7 +671,7 @@ fn digestStats(allocator: Allocator, visible: *const view.Visible, range: view.D
         const tag = tag_pairs.items[i].tag;
         var j = i;
         while (j < tag_pairs.items.len and std.mem.eql(u8, tag_pairs.items[j].tag, tag)) j += 1;
-        try counts.append(allocator, .{ .tag = tag, .count = @intCast(j - i) });
+        try counts.append(allocator, .{ .name = tag, .count = @intCast(j - i) });
         i = j;
     }
     std.mem.sort(TagCount, counts.items, {}, tagCountLessThan);
@@ -679,7 +682,7 @@ fn digestStats(allocator: Allocator, visible: *const view.Visible, range: view.D
     std.mem.sort(EntPair, place_pairs.items, {}, entPairLessThan);
     var place_counts = std.ArrayList(TagCount).empty;
     errdefer {
-        for (place_counts.items) |pc| allocator.free(pc.tag);
+        for (place_counts.items) |pc| allocator.free(pc.name);
         allocator.free(place_counts.items);
     }
     i = 0;
@@ -698,7 +701,7 @@ fn digestStats(allocator: Allocator, visible: *const view.Visible, range: view.D
         }
         const owned = try allocator.dupe(u8, name);
         errdefer allocator.free(owned);
-        try place_counts.append(allocator, .{ .tag = owned, .count = count });
+        try place_counts.append(allocator, .{ .name = owned, .count = count });
         i = j;
     }
     std.mem.sort(TagCount, place_counts.items, {}, tagCountLessThan);
@@ -724,7 +727,7 @@ fn digestStats(allocator: Allocator, visible: *const view.Visible, range: view.D
     for (word_toks.items) |t| allocator.free(t);
     allocator.free(word_toks.items);
     allocator.free(place_pairs.items); // names borrow from the payloads
-    for (place_counts.items[top_places.len..]) |pc| allocator.free(pc.tag);
+    for (place_counts.items[top_places.len..]) |pc| allocator.free(pc.name);
     allocator.free(place_counts.items);
     return DigestStats{
         .n = n,
@@ -744,7 +747,9 @@ fn digestStats(allocator: Allocator, visible: *const view.Visible, range: view.D
 /// filtered, cap 10), `activity` (one pair per day of the period, cap 14
 /// with a more-days note), and `people and places` (cap 5); an empty
 /// period renders the period line alone.
-fn renderDigestBodyFromStats(allocator: Allocator, stats: *const DigestStats, range: view.DayRange) DigestError![]u8 {
+/// The caller keeps the stats (this function is read-only); it owns the
+/// returned body.
+pub fn renderDigestBodyFromStats(allocator: Allocator, stats: *const DigestStats, range: view.DayRange) DigestError![]u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
     const d0 = view.civilDate(range.start) catch return error.TimestampOutOfRange;
@@ -766,7 +771,7 @@ fn renderDigestBodyFromStats(allocator: Allocator, stats: *const DigestStats, ra
             try out.appendSlice(allocator, "tags  ");
             for (stats.tags, 0..) |tc, idx| {
                 if (idx > 0) try out.appendSlice(allocator, ", ");
-                try line(allocator, &out, "{s} {d}", .{ tc.tag, tc.count });
+                try line(allocator, &out, "{s} {d}", .{ tc.name, tc.count });
             }
             try out.append(allocator, '\n');
         }
@@ -779,7 +784,7 @@ fn renderDigestBodyFromStats(allocator: Allocator, stats: *const DigestStats, ra
             try out.appendSlice(allocator, "top words  ");
             for (top, 0..) |tc, idx| {
                 if (idx > 0) try out.appendSlice(allocator, ", ");
-                try line(allocator, &out, "{s} {d}", .{ tc.tag, tc.count });
+                try line(allocator, &out, "{s} {d}", .{ tc.name, tc.count });
             }
             try out.append(allocator, '\n');
         }
@@ -820,7 +825,7 @@ fn renderDigestBodyFromStats(allocator: Allocator, stats: *const DigestStats, ra
             try out.appendSlice(allocator, "people and places  ");
             for (stats.places, 0..) |tc, idx| {
                 if (idx > 0) try out.appendSlice(allocator, ", ");
-                try line(allocator, &out, "{s}", .{tc.tag});
+                try line(allocator, &out, "{s}", .{tc.name});
             }
             try out.append(allocator, '\n');
         }
@@ -861,7 +866,10 @@ pub fn renderDigest(
 }
 
 const TagPair = struct { tag: []const u8, seq: u64 };
-const TagCount = struct { tag: []const u8, count: u32 };
+
+/// A name and its count. The name bytes belong to the producer (the
+/// owning struct's docs say who frees them); the counts are plain data.
+pub const TagCount = struct { name: []const u8, count: u32 };
 
 fn tagPairLessThan(_: void, a: TagPair, b: TagPair) bool {
     const o = std.mem.order(u8, a.tag, b.tag);
@@ -872,7 +880,7 @@ fn tagPairLessThan(_: void, a: TagPair, b: TagPair) bool {
 /// Count descending, then name ascending (digest tags and top words).
 fn tagCountLessThan(_: void, a: TagCount, b: TagCount) bool {
     if (a.count != b.count) return a.count > b.count;
-    return std.mem.order(u8, a.tag, b.tag) == .lt;
+    return std.mem.order(u8, a.name, b.name) == .lt;
 }
 
 fn line(allocator: Allocator, out: *std.ArrayList(u8), comptime fmt: []const u8, args: anytype) Allocator.Error!void {
@@ -997,55 +1005,139 @@ fn totalWords(allocator: Allocator, visible: *const view.Visible) Allocator.Erro
     return total;
 }
 
-/// The top-10 kind-0 entities with counts, `name count` pairs joined with
-/// ", " (count descending, then name ascending). The names borrow from
-/// `entities`; the caller frees the joined string. Null when `entities`
-/// holds none of the kind.
-fn entityTagPairs(allocator: Allocator, entities: []const Entity) Allocator.Error!?[]u8 {
-    var list = std.ArrayList(*const Entity).empty;
-    errdefer list.deinit(allocator);
-    for (entities) |*e| {
-        if (@backingInt(e.kind) == 0) try list.append(allocator, e);
-    }
-    if (list.items.len == 0) return null;
-    std.mem.sort(*const Entity, list.items, {}, entityCountLessThan);
-    var pairs = std.ArrayList([]const u8).empty;
-    errdefer pairs.deinit(allocator); // the pairs are owned copies
-    var joined: ?[]u8 = null;
-    errdefer if (joined) |s| allocator.free(s);
-    for (list.items[0..@min(10, list.items.len)]) |e| {
-        const pair = try std.fmt.allocPrint(allocator, "{s} {d}", .{ e.name, e.count });
-        errdefer allocator.free(pair);
-        try pairs.append(allocator, pair);
-    }
-    joined = try std.mem.join(allocator, ", ", pairs.items);
-    // Success: nothing fallible follows; free both buffers explicitly so
-    // the errdefers (error path only) don't double-free.
-    pairs.deinit(allocator);
-    list.deinit(allocator);
-    return @as(?[]u8, joined);
-}
-
-/// The top-10 entity names of `kind` (0 = tag, 1 = phrase) — count
-/// descending, then name ascending — joined with ", ". The names borrow
-/// from `entities`; the caller frees the joined string. Null when
-/// `entities` holds none of the kind.
-fn entityNames(allocator: Allocator, entities: []const Entity, kind: u8) Allocator.Error!?[]u8 {
+/// The top-10 entities of `kind` (0 = tag, 1 = phrase) as owned counts:
+/// count descending, then name ascending. The names borrow from
+/// `entities`; the caller frees the slice.
+fn topEntities(allocator: Allocator, entities: []const Entity, kind: u8) Allocator.Error![]TagCount {
     var list = std.ArrayList(*const Entity).empty;
     errdefer list.deinit(allocator);
     for (entities) |*e| {
         if (@backingInt(e.kind) == kind) try list.append(allocator, e);
     }
-    if (list.items.len == 0) return null;
     std.mem.sort(*const Entity, list.items, {}, entityCountLessThan);
+    const top = list.items[0..@min(10, list.items.len)];
+    const out = try allocator.alloc(TagCount, top.len);
+    errdefer allocator.free(out);
+    for (out, top) |*slot, e| slot.* = .{ .name = e.name, .count = e.count };
+    list.deinit(allocator); // success: nothing fallible follows
+    return out;
+}
+
+/// The profile's stats (spec/derived.md section 6): the span facts and
+/// the seven stats' values. Pure in (visible, entities). The name bytes
+/// in `tags` and `places` borrow from the index's entities; the `tags`
+/// and `places` slices are owned (see `deinit`).
+pub const ProfileStats = struct {
+    n: u64,
+    redacted: u64,
+    /// The earliest civil day, null when the journal is empty.
+    first_day: ?i64,
+    /// The fullest month's key (year × 12 + zero-based month), null when
+    /// empty.
+    month: ?i64,
+    /// The fullest weekday, 0 = Monday, null when empty.
+    weekday: ?u8,
+    /// The fullest time band (0 morning, 1 afternoon, 2 evening, 3
+    /// night), null when empty.
+    band: ?u32,
+    streak: u32,
+    avg_words: u64,
+    /// The top-10 kind-0 entities with counts (count descending, then
+    /// name ascending).
+    tags: []const TagCount,
+    /// The top-10 kind-1 entities with counts.
+    places: []const TagCount,
+    allocator: Allocator,
+
+    /// Frees the `tags` and `places` slices (the name bytes belong to
+    /// the index's entities, not to this struct).
+    pub fn deinit(self: ProfileStats) void {
+        self.allocator.free(self.tags);
+        self.allocator.free(self.places);
+    }
+};
+
+/// Computes the profile's stats (spec/derived.md section 6). Time-based
+/// stats (weekday, band, streak) count redacted entries; text-based
+/// stats don't. Pure in (visible, entities); the caller owns the stats
+/// (`deinit`).
+pub fn profileStats(
+    allocator: Allocator,
+    visible: *const view.Visible,
+    entities: []const Entity,
+) ProfileError!ProfileStats {
+    const n: u64 = @intCast(visible.entries.len);
+    var tags: []const TagCount = &.{};
+    var places: []const TagCount = &.{};
+    var own_tags: bool = false;
+    var own_places: bool = false;
+    errdefer {
+        if (own_tags) allocator.free(tags);
+        if (own_places) allocator.free(places);
+    }
+    var month: ?i64 = null;
+    var weekday: ?u8 = null;
+    var band: ?u32 = null;
+    var streak: u32 = 0;
+    var avg_words: u64 = 0;
+    if (n > 0) {
+        tags = try topEntities(allocator, entities, 0);
+        own_tags = true;
+        places = try topEntities(allocator, entities, 1);
+        own_places = true;
+        month = (try bestMonth(allocator, visible)).?.key;
+        weekday = bestWeekday(visible);
+        band = bestTimeBand(visible);
+        streak = longestStreak(visible);
+        const total = try totalWords(allocator, visible);
+        avg_words = total / n;
+    }
+    return ProfileStats{
+        .n = n,
+        .redacted = redactedCount(visible),
+        .first_day = firstDay(visible),
+        .month = month,
+        .weekday = weekday,
+        .band = band,
+        .streak = streak,
+        .avg_words = avg_words,
+        .tags = tags,
+        .places = places,
+        .allocator = allocator,
+    };
+}
+
+/// `name count` pairs joined with ", " (the profile's `tags` stat). Null
+/// when empty; the caller frees the joined string.
+fn joinTagCounts(allocator: Allocator, counts: []const TagCount) Allocator.Error!?[]u8 {
+    if (counts.len == 0) return null;
+    var parts = std.ArrayList([]const u8).empty;
+    errdefer {
+        for (parts.items) |p| allocator.free(p);
+        allocator.free(parts.items);
+    }
+    for (counts) |tc| {
+        const pair = try allocator.print("{s} {d}", .{ tc.name, tc.count });
+        errdefer allocator.free(pair);
+        try parts.append(allocator, pair);
+    }
+    const joined = try std.mem.join(allocator, ", ", parts.items);
+    // Success: nothing fallible follows; free the buffers explicitly so
+    // the errdefer (error path only) doesn't double-free.
+    for (parts.items) |p| allocator.free(p);
+    allocator.free(parts.items);
+    return @as(?[]u8, joined);
+}
+
+/// The names joined with ", " (the profile's `people and places` stat).
+/// Null when empty; the caller frees the joined string.
+fn joinEntityNames(allocator: Allocator, counts: []const TagCount) Allocator.Error!?[]u8 {
+    if (counts.len == 0) return null;
     var names = std.ArrayList([]const u8).empty;
-    errdefer names.deinit(allocator); // the names borrow from `entities`
-    for (list.items[0..@min(10, list.items.len)]) |e| try names.append(allocator, e.name);
+    errdefer names.deinit(allocator); // the names borrow from the TagCounts
+    for (counts) |tc| try names.append(allocator, tc.name);
     const joined = try std.mem.join(allocator, ", ", names.items);
-    // Success: nothing fallible follows; free both buffers explicitly so
-    // the errdefers (error path only) don't double-free.
-    names.deinit(allocator);
-    list.deinit(allocator);
+    names.deinit(allocator); // success: nothing fallible follows
     return @as(?[]u8, joined);
 }
 
@@ -1058,60 +1150,62 @@ fn statLine(allocator: Allocator, out: *std.ArrayList(u8), label: []const u8, wi
     try out.append(allocator, '\n');
 }
 
-/// Renders the profile display body (spec/derived.md section 6): the span
-/// line (`{n} entries · {first-date} onward`, middle-dot U+00B7), a blank
-/// line, and the stat block — labels padded to the longest label plus two
-/// spaces, an empty stat an em dash (U+2014). An empty journal renders
-/// `0 entries` alone.
-pub fn renderProfileBody(
-    allocator: Allocator,
-    visible: *const view.Visible,
-    entities: []const Entity,
-) ProfileError![]u8 {
+/// Renders the profile display body from the computed stats
+/// (spec/derived.md section 6): the span line (`{n} entries ·
+/// {first-date} onward`, middle-dot U+00B7), a blank line, and the stat
+/// block — labels padded to the longest label plus two spaces, an empty
+/// stat an em dash (U+2014). An empty journal renders `0 entries` alone.
+/// The caller keeps the stats; this function owns the returned body.
+pub fn renderProfileBodyFromStats(allocator: Allocator, stats: *const ProfileStats) ProfileError![]u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
-    var tag_pairs: ?[]u8 = null;
-    var place_names: ?[]u8 = null;
-    errdefer {
-        if (tag_pairs) |s| allocator.free(s);
-        if (place_names) |s| allocator.free(s);
-    }
-    const n: u64 = @intCast(visible.entries.len);
-    if (n == 0) {
+    var tag_joined: ?[]u8 = null;
+    errdefer if (tag_joined) |s| allocator.free(s);
+    var place_joined: ?[]u8 = null;
+    errdefer if (place_joined) |s| allocator.free(s);
+    if (stats.n == 0) {
         try line(allocator, &out, "0 entries\n", .{});
     } else {
-        const first = view.civilDate(firstDay(visible).?) catch return error.TimestampOutOfRange;
-        const best = (try bestMonth(allocator, visible)).?;
+        const first = view.civilDate(stats.first_day.?) catch return error.TimestampOutOfRange;
         try line(allocator, &out, "{d} {s} \u{B7} {d:0>4}-{d:0>2}-{d:0>2} onward", .{
-            n, view.countNoun(n, "entry", "entries"), first.year, first.month, first.day,
+            stats.n, view.countNoun(stats.n, "entry", "entries"), first.year, first.month, first.day,
         });
-        const r = redactedCount(visible);
-        if (r > 0) try line(allocator, &out, " ({d} redacted)", .{r});
+        if (stats.redacted > 0) try line(allocator, &out, " ({d} redacted)", .{stats.redacted});
         try out.append(allocator, '\n');
         try out.append(allocator, '\n'); // blank line before the stat block
-        tag_pairs = try entityTagPairs(allocator, entities);
-        place_names = try entityNames(allocator, entities, 1);
+        tag_joined = try joinTagCounts(allocator, stats.tags);
+        place_joined = try joinEntityNames(allocator, stats.places);
         // All seven labels are always present, so the longest decides the
         // column width.
         const width = @max("most active".len, @max("time of day".len, "people and places".len)) + 2;
         var vbuf: [24]u8 = undefined;
         const month = std.fmt.bufPrint(&vbuf, "{d:0>4}-{d:0>2}", .{
-            @as(u64, @intCast(@divTrunc(best.key, 12))), @as(u64, @intCast(@mod(best.key, 12))) + 1,
+            @as(u64, @intCast(@divTrunc(stats.month.?, 12))), @as(u64, @intCast(@mod(stats.month.?, 12))) + 1,
         }) catch unreachable;
         try statLine(allocator, &out, "most active", width, month);
-        try statLine(allocator, &out, "weekday", width, view.Weekdays[bestWeekday(visible).?]);
+        try statLine(allocator, &out, "weekday", width, view.Weekdays[stats.weekday.?]);
         const bands = [_][]const u8{ "morning", "afternoon", "evening", "night" };
-        try statLine(allocator, &out, "time of day", width, bands[bestTimeBand(visible).?]);
-        const streak = longestStreak(visible);
-        const streak_v = std.fmt.bufPrint(&vbuf, "{d} {s}", .{ streak, view.countNoun(streak, "day", "days") }) catch unreachable;
+        try statLine(allocator, &out, "time of day", width, bands[stats.band.?]);
+        const streak_v = std.fmt.bufPrint(&vbuf, "{d} {s}", .{ stats.streak, view.countNoun(stats.streak, "day", "days") }) catch unreachable;
         try statLine(allocator, &out, "streak", width, streak_v);
-        const total = try totalWords(allocator, visible);
-        const avg_v = std.fmt.bufPrint(&vbuf, "{d}", .{(total / n)}) catch unreachable;
+        const avg_v = std.fmt.bufPrint(&vbuf, "{d}", .{stats.avg_words}) catch unreachable;
         try statLine(allocator, &out, "avg words", width, avg_v);
-        try statLine(allocator, &out, "tags", width, tag_pairs orelse "\u{2014}");
-        try statLine(allocator, &out, "people and places", width, place_names orelse "\u{2014}");
+        try statLine(allocator, &out, "tags", width, tag_joined orelse "\u{2014}");
+        try statLine(allocator, &out, "people and places", width, place_joined orelse "\u{2014}");
     }
     return out.toOwnedSlice(allocator);
+}
+
+/// Renders the profile display body (spec/derived.md section 6). The
+/// caller owns the returned body.
+pub fn renderProfileBody(
+    allocator: Allocator,
+    visible: *const view.Visible,
+    entities: []const Entity,
+) ProfileError![]u8 {
+    const stats = try profileStats(allocator, visible, entities);
+    defer stats.deinit();
+    return renderProfileBodyFromStats(allocator, &stats);
 }
 
 /// Renders the profile artifact (spec/derived.md section 6): the machine

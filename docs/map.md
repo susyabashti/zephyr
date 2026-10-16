@@ -68,6 +68,7 @@ deterministic fake.
 | `src/cli/errors.zig` | the CLI error set (`cli.RunError`): the union of every command's failures, mapped to exit codes in `main.zig` |
 | `src/cli/journal.zig` | shared journal access: path resolution (`--journal`, `$ZEPHYR_HOME`), open, verify-before-trust gate, wall clock, footer head |
 | `src/cli/output.zig` | all CLI formatting and rendering: stdout/stderr writers, usage text, FAIL/status/anchor lines |
+| `src/cli/table.zig` | TTY presentation of the derived surfaces: terminal-width probe, the shared name/count/bar table, the styled `recap`/`profile` bodies (piped bytes never go through here) |
 | `src/cli/embed_helpers.zig` | shared model-load helpers for the embedding commands: path resolution, auto-fetch, actionable error reporting |
 | `src/cli/render_tests.zig` | test root for the CLI layer: pulls the styled renderer tests into the test step (no logic) |
 | `src/cli/commands/ask.zig` | `zephyr ask` — deterministic context pack for the user's AI; degrades to keyword when embeddings fail |

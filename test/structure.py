@@ -34,7 +34,8 @@ CHAR_LITERAL_RE = re.compile(r"'(\\u\{[^}]*\}|\\.|[^'\\])'")
 # Module names that are not one of the project modules.
 OPTION_MODULES = {"std_options", "embed_options", "options"}
 
-# Which module names each zone may import (besides std and option modules).
+# Which module names each zone may import (besides std, builtin, and
+# option modules).
 ALLOWED_MODULES = {
     "core": {"zephyr_core"},
     "mcp": {"zephyr_core"},
@@ -99,7 +100,7 @@ def check_imports(path, text):
     for m in IMPORT_RE.finditer(text):
         name = m.group(1)
         line = line_of(text, m.start())
-        if name == "std" or name in OPTION_MODULES:
+        if name in ("std", "builtin") or name in OPTION_MODULES:
             continue
         if name in ("zephyr_core", "zephyr_mcp", "zephyr_embed"):
             if name not in allowed:

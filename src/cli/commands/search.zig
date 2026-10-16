@@ -1,5 +1,6 @@
 //! zephyr search <query...> — keyword search over the visible entries.
-//! On a TTY the seq is accented, the date bold, the time dimmed.
+//! On a TTY the seq is accented, the date bold, the time dimmed, the
+//! tags yellow.
 
 const std = @import("std");
 const core = @import("zephyr_core");
@@ -45,8 +46,8 @@ pub fn run(
 /// The styled search view (TTY only). The same bytes as
 /// core.search.render: the count label, a blank line, then one line per
 /// match — with the seq accented (the handle for edit/rm/redact, the same
-/// cyan as the ✓ lines), the date bold, and the time dimmed; the tag block
-/// and the text at full weight.
+/// cyan as the ✓ lines), the date bold, the time dimmed, and the tag
+/// block yellow; the text at full weight.
 fn renderStyled(
     arena: Allocator,
     style: output.Style,
@@ -77,7 +78,9 @@ fn renderStyled(
             try out.appendSlice(arena, try style.dim(arena, &time));
             try out.appendSlice(arena, "  ");
             for (m.tags) |tag| {
-                try out.appendSlice(arena, try arena.print("[{s}]", .{tag}));
+                const bracketed = try arena.print("[{s}]", .{tag});
+                defer arena.free(bracketed);
+                try out.appendSlice(arena, try style.warn(arena, bracketed));
             }
             if (m.tags.len > 0) try out.append(arena, ' ');
             try out.appendSlice(arena, m.text);
@@ -114,14 +117,14 @@ test "styled search: off style is the frozen render; on style adds SGR only" {
     try std.testing.expectEqualStrings("0 matches for \"zebra\"\n", frozen_none);
 
     // Style on: the same bytes wrapped in SGR — accent seq, bold date,
-    // dim time; the tag block and text stay at full weight.
+    // dim time, yellow tag block; the text stays at full weight.
     const styled = try renderStyled(allocator, output.Style{ .enabled = true }, &matches, "milk");
     defer allocator.free(styled);
     const e = "\x1b[";
     try std.testing.expectEqualStrings(
         "2 matches for \"milk\"\n\n" ++
             e ++ "36m0" ++ e ++ "0m  " ++ e ++ "1m2026-01-01" ++ e ++ "0m " ++ e ++ "2m00:00" ++ e ++ "0m  bought milk\n" ++
-            e ++ "36m1" ++ e ++ "0m  " ++ e ++ "1m2026-01-01" ++ e ++ "0m " ++ e ++ "2m00:01" ++ e ++ "0m  [work] walked the dog\n",
+            e ++ "36m1" ++ e ++ "0m  " ++ e ++ "1m2026-01-01" ++ e ++ "0m " ++ e ++ "2m00:01" ++ e ++ "0m  " ++ e ++ "33m[work]" ++ e ++ "0m walked the dog\n",
         styled,
     );
 }

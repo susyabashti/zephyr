@@ -652,6 +652,27 @@ pub fn resolveRange(
 
 // ---------------------------------------------------------------- digest or rebuild
 
+/// The digest stats for `range`; the stored artifact is kept fresh
+/// (regenerated and stored when stale or missing) so `derived status` and
+/// inspection stay true. The caller owns the stats (`deinit`). Backs
+/// `zephyr recap`.
+pub fn digestStatsOrRebuild(
+    allocator: Allocator,
+    journal: *const journal_mod.Journal,
+    visible: *const view.Visible,
+    range: view.DayRange,
+    result: journal_mod.VerifyResult,
+) (Allocator.Error || IoError || derived.DigestError || error{TimestampOutOfRange})!derived.DigestStats {
+    if (try loadFreshDigest(allocator, journal, range, result)) |doc| {
+        allocator.free(doc);
+    } else {
+        const fresh = try derived.renderDigest(allocator, visible, range, result.head);
+        try saveDigest(allocator, journal, range, fresh);
+        allocator.free(fresh);
+    }
+    return derived.digestStats(allocator, visible, range);
+}
+
 /// The digest display body for `range`; the stored artifact is kept fresh
 /// (regenerated and stored when stale or missing) so `derived status` and
 /// inspection stay true. Backs `zephyr recap`.
@@ -662,14 +683,9 @@ pub fn digestOrRebuild(
     range: view.DayRange,
     result: journal_mod.VerifyResult,
 ) (Allocator.Error || IoError || derived.DigestError || error{TimestampOutOfRange})![]u8 {
-    if (try loadFreshDigest(allocator, journal, range, result)) |doc| {
-        allocator.free(doc);
-    } else {
-        const fresh = try derived.renderDigest(allocator, visible, range, result.head);
-        try saveDigest(allocator, journal, range, fresh);
-        allocator.free(fresh);
-    }
-    return derived.renderDigestBody(allocator, visible, range);
+    const stats = try digestStatsOrRebuild(allocator, journal, visible, range, result);
+    defer stats.deinit();
+    return derived.renderDigestBodyFromStats(allocator, &stats, range);
 }
 
 // ---------------------------------------------------------------- profile + notes
@@ -705,23 +721,21 @@ pub fn renderProfileDisplay(
     return try out.toOwnedSlice(allocator);
 }
 
-/// The profile display (notes presentation when `notes.md` exists) with the
-/// derived artifacts kept fresh: a legacy document is migrated first, and
-/// stale or missing index/profile artifacts are rebuilt and stored. Backs
-/// `zephyr profile`.
-pub fn profileWithNotes(
+/// The derived index with the artifacts kept fresh: a legacy document is
+/// migrated first, and stale or missing index/profile artifacts are rebuilt
+/// and stored. The caller owns the index (`deinit`). Backs `zephyr profile`.
+pub fn profileFresh(
     allocator: Allocator,
     journal: *const journal_mod.Journal,
     visible: *const view.Visible,
     result: journal_mod.VerifyResult,
-) PackError![]u8 {
+) PackError!derived.Index {
     try migrateLegacyProfile(allocator, journal);
     const idx = (try loadFreshIndex(allocator, journal, result)) orelse blk: {
         const fresh = try derived.buildIndex(allocator, visible, result.head, result.record_count);
         try saveIndex(allocator, journal, fresh);
         break :blk fresh;
     };
-    defer idx.deinit();
     if (try loadFreshProfile(allocator, journal, result)) |doc| {
         allocator.free(doc);
     } else {
@@ -729,7 +743,26 @@ pub fn profileWithNotes(
         try saveProfile(journal, fresh);
         allocator.free(fresh);
     }
+    return idx;
+}
+
+/// The profile display (notes presentation when `notes.md` exists) with the
+/// derived artifacts kept fresh. Backs `zephyr profile`.
+pub fn profileWithNotes(
+    allocator: Allocator,
+    journal: *const journal_mod.Journal,
+    visible: *const view.Visible,
+    result: journal_mod.VerifyResult,
+) PackError![]u8 {
+    const idx = try profileFresh(allocator, journal, visible, result);
+    defer idx.deinit();
     return renderProfileDisplay(allocator, journal, visible, idx.entities);
+}
+
+/// The journal's `notes.md` verbatim, or null when the file is absent.
+/// The caller frees the bytes.
+pub fn readNotesOrNull(allocator: Allocator, journal: *const journal_mod.Journal) Io.Dir.ReadFileAllocError!?[]u8 {
+    return readJournalOrNull(allocator, journal, NotesFile);
 }
 
 // ---------------------------------------------------------------- status

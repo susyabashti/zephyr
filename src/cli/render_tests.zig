@@ -6,8 +6,10 @@
 
 const views = @import("commands/views.zig");
 const search = @import("commands/search.zig");
+const table = @import("table.zig");
 
 test "cli render modules instantiate" {
     _ = views;
     _ = search;
+    _ = table;
 }
