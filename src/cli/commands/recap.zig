@@ -6,6 +6,7 @@ const core = @import("zephyr_core");
 const errors = @import("../errors.zig");
 const args = @import("../args.zig");
 const output = @import("../output.zig");
+const table = @import("../table.zig");
 const cli_journal = @import("../journal.zig");
 
 const Io = std.Io;
@@ -35,6 +36,15 @@ pub fn run(
     const visible = try core.view.visibleEntries(arena, recs.headers, recs.payloads);
     defer visible.deinit();
     if (range == null) range = try args.currentWeek(&journal);
-    const digest = try core.dstore.digestOrRebuild(arena, &journal, &visible, range.?, result);
-    try output.printBlock(out, io, digest);
+    const stats = try core.dstore.digestStatsOrRebuild(arena, &journal, &visible, range.?, result);
+    defer stats.deinit();
+    // Piped output (and $NO_COLOR) keeps the frozen contract bytes;
+    // the TTY gets the styled tables.
+    if (style.enabled) {
+        const rendered = try table.renderRecap(arena, &stats, range.?, style, table.terminalColumns(out));
+        try output.printBlock(out, io, rendered);
+    } else {
+        const body = try core.derived.renderDigestBodyFromStats(arena, &stats, range.?);
+        try output.printBlock(out, io, body);
+    }
 }

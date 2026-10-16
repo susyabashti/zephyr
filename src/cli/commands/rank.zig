@@ -9,7 +9,8 @@
 //!
 //!   <seq>  YYYY-MM-DD HH:MM  [tag]... text   (score, 3 decimals)
 //!
-//! On a TTY the seq is accented, the date bold, the time and score dimmed.
+//! On a TTY the seq is accented, the date bold, the time and score
+//! dimmed, the tags yellow.
 //!
 //! `vector` and `hybrid` need the fresh embedding artifact and the model;
 //! without them they report where to build it and fail with
@@ -145,7 +146,8 @@ pub fn run(
 /// from the text by three spaces (spec/semantic.md section 7). Entries
 /// absent from the visible set (a stale artifact cannot happen here, but
 /// neither can a redaction after the build) are skipped, not padded. On a
-/// TTY the seq is accented, the date bold, the time and score dimmed.
+/// TTY the seq is accented, the date bold, the time and score dimmed, the
+/// tags yellow.
 fn renderHits(
     arena: Allocator,
     io: Io,
@@ -164,7 +166,11 @@ fn renderHits(
         const tail = if (e.tags.len > 0) blk: {
             var tags = std.ArrayList(u8).empty;
             errdefer tags.deinit(arena);
-            for (e.tags) |tag| try tags.appendSlice(arena, try arena.print("[{s}]", .{tag}));
+            for (e.tags) |tag| {
+                const bracketed = try arena.print("[{s}]", .{tag});
+                errdefer arena.free(bracketed);
+                try tags.appendSlice(arena, try style.warn(arena, bracketed));
+            }
             break :blk try arena.print("{s} {s}", .{ try tags.toOwnedSlice(arena), e.text });
         } else e.text;
         const seq_str = std.fmt.bufPrint(&seq_buf, "{d}", .{hit.seq}) catch unreachable;

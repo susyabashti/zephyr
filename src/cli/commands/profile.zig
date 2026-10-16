@@ -4,6 +4,7 @@ const std = @import("std");
 const core = @import("zephyr_core");
 const errors = @import("../errors.zig");
 const output = @import("../output.zig");
+const table = @import("../table.zig");
 const cli_journal = @import("../journal.zig");
 
 const Io = std.Io;
@@ -26,6 +27,19 @@ pub fn run(
     defer recs.deinit();
     const visible = try core.view.visibleEntries(arena, recs.headers, recs.payloads);
     defer visible.deinit();
-    const doc = try core.dstore.profileWithNotes(arena, &journal, &visible, result);
-    try output.printBlock(out, io, doc);
+    const idx = try core.dstore.profileFresh(arena, &journal, &visible, result);
+    defer idx.deinit();
+    // Piped output (and $NO_COLOR) keeps the frozen contract bytes;
+    // the TTY gets the styled stat sections.
+    if (!style.enabled) {
+        const doc = try core.dstore.renderProfileDisplay(arena, &journal, &visible, idx.entities);
+        try output.printBlock(out, io, doc);
+        return;
+    }
+    const stats = try core.derived.profileStats(arena, &visible, idx.entities);
+    defer stats.deinit();
+    const notes = try core.dstore.readNotesOrNull(arena, &journal);
+    defer if (notes) |n| arena.free(n);
+    const rendered = try table.renderProfile(arena, &stats, notes, style, table.terminalColumns(out));
+    try output.printBlock(out, io, rendered);
 }

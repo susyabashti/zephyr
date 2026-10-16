@@ -5,8 +5,11 @@ description: >
   discovery, multi-line strings, dangling slices, error-set algebra, integer
   casts, @memcpy, fixed-width fmt, std.json, std.Io buffering and flush,
   catch forms, allocator free-poisoning, anonymous struct coercion,
-  uninstantiated function bodies, and zig build test quirks (silent success,
-  stale .zig-cache binaries, spurious "failed command"). Use when writing or
+  uninstantiated function bodies, 0.17 one-liners (math.max/min,
+  Target.native, never-mutated var, var discard), native-OS switching via
+  builtin.os.tag, terminal-size probing (TIOCGWINSZ), errdefer block form,
+  and zig build test quirks (silent success, stale .zig-cache binaries,
+  spurious "failed command"). Use when writing or
   debugging Zig, when tests mysteriously do not run, on segfaults or "error
   set" compile errors, or when string, fmt, or JSON misbehaves. Companion to
   zig-api (version-specific APIs) and zig-tiger-style (style).
@@ -400,6 +403,12 @@ std.debug.print("line: {s}\n", .{line});
   code and `zig build test --summary all` (a genuinely failed step is never
   cached); do not "fix" the passing test.
 
+- **`zig test file.zig` (and `zig build-obj file.zig`) on a file with no
+  test block compiles nothing:** a file with a type error in a `pub fn`
+  reports `All 0 tests passed.` and exits 0. Only code reachable from an
+  instantiated test (or `main`) is analyzed — see 19. A "does this
+  compile?" probe must be a test that *calls* the probed code.
+
 ## 12. A non-void value must be used
 
 Every expression that yields a value must be bound or explicitly discarded —
@@ -503,8 +512,18 @@ after every response, or the peer hangs until the buffer fills.
 
 ## 16. Muscle-memory one-liners that no longer compile (0.17)
 
-- `std.math.min(a, b)` — `error: root source file struct 'math' has no member
-  named 'min'`. Use the builtin `@min(a, b)`.
+- `std.math.min(a, b)` / `std.math.max(a, b)` — `error: root source file
+  struct 'math' has no member named 'min'` (and likewise `'max'`). Use the
+  builtins `@min(a, b)` / `@max(a, b)`.
+- `std.Target.native` — `error: root source file struct 'Target' has no
+  member named 'native'`. Native-OS facts live only in `@import("builtin")`
+  — see 22.
+- A `var` that is never written is an error: `error: local variable is
+  never mutated`. Read-only locals are `const`.
+- `_ = x;` on a **mutable** local — `error: pointless discard of local
+  variable`. `_ =` on a `const` local and on call results is fine. Either
+  mutate the var without a discard (`x += 1;` alone compiles) or make it a
+  `const`.
 - Fill-init `[16]u8{0}` — `error: expected 16 array elements; found 1`.
   Use `std.mem.zeroes([16]u8)`.
 
@@ -593,4 +612,72 @@ const x = (&msg)[o..];   // parens first: slice the array's pointer
 ```
 
 When a raw pointer into the array is genuinely required (a C-API parameter
-such as `[*:0]const u8`), slice first and take `.ptr`: `msg[o..].ptr`..
+such as `[*:0]const u8`), slice first and take `.ptr`: `msg[o..].ptr`.
+
+## 22. Native OS facts: `@import("builtin")` only (0.17)
+
+There is no `std.builtin` and no `std.Target.native`:
+
+- `std.builtin.os.tag` — `error: root source file struct 'lang' has no
+  member named 'os'` (the error names `lang`, not `builtin`).
+- `std.Target.native` — `error: root source file struct 'Target' has no
+  member named 'native'`.
+
+The native OS tag is a comptime enum value on the compiler-synthesized
+`builtin` package:
+
+```zig
+const builtin = @import("builtin");
+pub fn osTag() @TypeOf(builtin.os.tag) {
+    return builtin.os.tag;
+}
+```
+
+- The tag type (printed as `Target.Os.Tag`) has no name you can write:
+  neither a root-level `Target` (`error: use of undeclared identifier
+  'Target'`) nor a `builtin.Target` declaration exists. Name it with
+  `@TypeOf(builtin.os.tag)`, or don't name it.
+- A `switch` on the tag does not semantically analyze arms for other OSes —
+  verified on macOS, an arm containing the nonexistent
+  `std.posix.TIOCGWINSZ` under `.linux =>` compiled — so this is the guard
+  for OS-specific `std.c` calls. But the switch must still be exhaustive:
+  `error: switch must handle all possibilities` /
+  `note: unhandled enumeration value: 'freestanding'`. List every enum
+  value or add an `else` arm.
+
+## 23. Terminal size: `winsize` is in std, `TIOCGWINSZ` is not (0.17)
+
+The struct exists; the request constant does not:
+`error: root source file struct 'posix' has no member named 'TIOCGWINSZ'`.
+The request code is OS-specific, so hardcode it per OS (see 22) and probe
+with `std.c.ioctl`:
+
+```zig
+pub fn terminalColumns(file: std.Io.File, request: c_int) u16 {
+    var ws = std.mem.zeroes(std.posix.winsize);
+    if (std.c.ioctl(file.handle, request, &ws) == 0 and ws.col > 0)
+        return ws.col;
+    return 80;
+}
+// macOS request: 0x40087468   Linux request: 0x5413
+```
+
+- The macOS constant is `_IOR('t', 104, sizeof(struct winsize))`, verified
+  by computation: `0x40000000 | (8 << 16) | (0x74 << 8) | 104` =
+  `0x40087468`. The Linux `0x5413` decodes to type `'T'`, nr 19, size 0
+  (the UAPI literal), but it was never executed on the machine that wrote
+  this — treat it as unverified until a Linux run.
+- Gate on **both** `ret == 0` **and** `ws.col > 0`: on a non-tty the ioctl
+  fails and the `winsize` fields are undefined; the `col > 0` check keeps a
+  garbage field from leaking into the layout.
+
+## 24. `errdefer` with an `if` body needs the block form
+
+Bare `errdefer if (cond) { ... }` does not parse:
+`error: expected ';' after statement`. Wrap the statement in a block:
+
+```zig
+errdefer {
+    if (cleanup_needed) deinit();
+}
+```
