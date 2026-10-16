@@ -14,6 +14,7 @@
 //! its fd is closed exactly once — by the child's cleanup.
 
 const std = @import("std");
+const args = @import("args.zig");
 const output = @import("output.zig");
 const table = @import("table.zig");
 
@@ -79,37 +80,15 @@ pub fn shouldPage(
     return std.mem.count(u8, text, "\n") > table.terminalRows(out);
 }
 
+/// The shared environment-command spec (also used for $VISUAL/$EDITOR).
+pub const Args = args.Args;
+
 /// The pager's argv: $PAGER split on whitespace (at most 8 tokens; quoted
-/// arguments are not supported), or `less -R` when unset or blank. The
-/// token slices point into the environ map's values, which live for the
-/// process; the token array is returned by value and is valid as long as
-/// the caller keeps the result.
-pub const Args = struct {
-    tokens: [8][]const u8,
-    count: usize,
-
-    /// A view into this value's tokens: valid only while `self` lives.
-    pub fn slices(self: *const Args) []const []const u8 {
-        return self.tokens[0..self.count];
-    }
-};
-
+/// arguments are not supported), or `less -R` when unset or blank.
 pub fn pagerArgs(environ_map: *const Environ.Map) Args {
     if (environ_map.get("PAGER")) |spec| {
-        var tokens: [8][]const u8 = undefined;
-        var n: usize = 0;
-        var start: usize = 0;
-        var i: usize = 0;
-        while (i <= spec.len) : (i += 1) {
-            const boundary = i == spec.len or std.ascii.isWhitespace(spec[i]);
-            if (!boundary) continue;
-            if (i > start and n < tokens.len) {
-                tokens[n] = spec[start..i];
-                n += 1;
-            }
-            start = i + 1;
-        }
-        if (n > 0) return Args{ .tokens = tokens, .count = n };
+        const a = args.splitWhitespace(spec);
+        if (a.count > 0) return a;
     }
     var default_tokens: [8][]const u8 = undefined;
     default_tokens[0] = "less";

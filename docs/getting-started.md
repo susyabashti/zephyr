@@ -54,6 +54,23 @@ date header per day, each entry with its sequence number and time in the
 local timezone, the latest text of an amended entry (marked `(edited)`),
 and a `[redacted]` marker where content was removed.
 
+Prefer a real editor? `zephyr` with no arguments (or `zephyr log` with no
+text) opens `$VISUAL`, then `$EDITOR`, then `vi`, on a buffer stored beside
+the journal:
+
+```sh
+zephyr
+# first line:  # tags: work, home   ← comma-separated tags (empty = none)
+# below that:  the entry text, as many lines as you like (joined into one)
+# ✓ logged seq 2
+```
+
+`zephyr edit <seq>` with only the sequence number does the same for an
+existing entry — the buffer is seeded with the entry's current text and
+tags, and saving appends an amendment (the buffer is the source of truth:
+deleting the `# tags:` line clears the tags). Saving with empty text, or
+without any change, cancels; nothing is logged.
+
 Search finds entries:
 
 ```sh
@@ -190,6 +207,7 @@ zephyr export --for-ai 2026-10-01:2026-10-14    # a range
 | `ZEPHYR_HOME`        | journal directory (default `~/.local/share/zephyr`) |
 | `ZEPHYR_KEY`         | checkpoint key file (default `<journal>/zephyr-key`)|
 | `ZEPHYR_EMBED_MODEL` | model file (default `~/.zephyr/models/embeddinggemma-300M-Q8_0.gguf`) |
+| `VISUAL` / `EDITOR`  | the editor for `zephyr` (no args), `zephyr log` (no text), and `zephyr edit <seq>` (no text); whitespace-split, default `vi` |
 
 ## What's next
 

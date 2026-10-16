@@ -15,6 +15,19 @@ describes the behavior a user or an AI will observe.
   text is NFC-normalized UTF-8; tags are optional.
 - Prints `✓ logged seq N`, where N is the new record's sequence number.
 - A bare word is a quick log: `zephyr fix the bug` logs `fix the bug`.
+- With no text on a TTY, the **editor** is opened instead: `zephyr` (no
+  arguments) or `zephyr log`. The editor is `$VISUAL`, then `$EDITOR`,
+  then `vi` (whitespace-split, like `$PAGER`; quoted arguments are not
+  supported). The buffer is a temp file beside the journal (never /tmp —
+  it is the user's entry): the first line `# tags: a, b` is the tag list
+  (comma-separated, the single source of truth for tags — flags never
+  pre-fill it), and the remaining lines are the text, joined into one.
+  Saving logs `✓ logged seq N`; the temp file is removed on every path.
+- Canceling is not an error — a dim `cancelled` on stderr, exit 0, nothing
+  logged — when the editor exits non-zero, the joined text is empty, or
+  (amending) the buffer parses to the same tags and text as the seed.
+- A `-t TAG` with no text, or no text on a non-TTY, is a usage error
+  (exit 2) as before.
 
 **Amend** — `zephyr edit <seq> [-t TAG]... "text"`
 
@@ -22,6 +35,11 @@ describes the behavior a user or an AI will observe.
   in the log. Prints `✓ amended seq N → M` (M is the amendment's seq).
 - The entry's tags are carried over unless `-t` is given, so a plain text
   edit never silently drops tags.
+- With only a seq (no text) on a TTY, the editor is opened seeded with
+  the entry's current text (the latest amendment's) and effective tags;
+  saving amends with the buffer as the source of truth — deleting the
+  `# tags:` line clears the tags. An unchanged buffer prints a dim
+  `unchanged` and does nothing (exit 0).
 
 **Hide** — `zephyr rm <seq>`
 

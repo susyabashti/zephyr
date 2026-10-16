@@ -1,6 +1,7 @@
 //! Argument and flag parsing shared by the CLI commands: the `-t TAG`
-//! flags plus free text, civil-date and date-range parsing, and the
-//! current week under the journal's timezone.
+//! flags plus free text, civil-date and date-range parsing, the current
+//! week under the journal's timezone, and environment command specs
+//! ($PAGER, $VISUAL/$EDITOR) split into argv.
 
 const std = @import("std");
 const core = @import("zephyr_core");
@@ -18,6 +19,41 @@ pub const ParsedArgs = struct {
         self.parts.deinit(allocator);
     }
 };
+
+/// A command spec taken from the environment ($PAGER, $VISUAL, $EDITOR):
+/// whitespace-split into at most 8 tokens. Quoted arguments are not
+/// supported (a documented limitation, not a bug). The token slices point
+/// into the environ map's values, which live for the process; the array is
+/// returned by value and is valid as long as the caller keeps the result.
+pub const Args = struct {
+    tokens: [8][]const u8,
+    count: usize,
+
+    /// A view into this value's tokens: valid only while `self` lives.
+    pub fn slices(self: *const Args) []const []const u8 {
+        return self.tokens[0..self.count];
+    }
+};
+
+/// Split `spec` on runs of whitespace into at most 8 tokens (empty tokens
+/// dropped). The token slices point into `spec`; the result carries no
+/// allocation.
+pub fn splitWhitespace(spec: []const u8) Args {
+    var tokens: [8][]const u8 = undefined;
+    var n: usize = 0;
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i <= spec.len) : (i += 1) {
+        const boundary = i == spec.len or std.ascii.isWhitespace(spec[i]);
+        if (!boundary) continue;
+        if (i > start and n < tokens.len) {
+            tokens[n] = spec[start..i];
+            n += 1;
+        }
+        start = i + 1;
+    }
+    return Args{ .tokens = tokens, .count = n };
+}
 
 pub const ParseArgsError = Allocator.Error || error{Usage};
 
