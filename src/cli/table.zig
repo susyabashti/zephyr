@@ -34,7 +34,15 @@ pub const FallbackRows: u16 = 40;
 
 fn ttySize(file: File, request: c_int) ?std.posix.winsize {
     var ws: std.posix.winsize = undefined;
-    if (std.c.ioctl(file.handle, request, &ws) == 0 and ws.row > 0 and ws.col > 0) return ws;
+    // Linux: the raw syscall — std.c requires an explicit libc dependency,
+    // which core-only modules (such as the render tests) do not declare,
+    // so linking it there is a compile error. macOS: C interop, resolved
+    // from the system dynamic libraries.
+    const ok: bool = switch (@import("builtin").os.tag) {
+        .linux => std.os.linux.ioctl(file.handle, @as(u32, @bitCast(request)), @intFromPtr(&ws)) == 0,
+        else => std.c.ioctl(file.handle, request, &ws) == 0,
+    };
+    if (ok and ws.row > 0 and ws.col > 0) return ws;
     return null;
 }
 
