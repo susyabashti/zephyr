@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const core = @import("zephyr_core");
+const key = @import("zephyr_key");
 const mcp = @import("zephyr_mcp");
 const embed_mod = @import("zephyr_embed");
 
@@ -17,6 +18,15 @@ pub const RunError = error{
     TargetNotFound,
     TargetNotEntry,
     BadKeyFile,
+    // The encryption surface (spec/encryption.md): the key pinned by the
+    // journal's meta file is gone, the keychain is locked or unavailable,
+    // or the key bytes no longer look like a key.
+    KeyNotFound,
+    KeychainUnavailable,
+    KeyCorrupt,
+    // Segments without a meta file: a v1 journal — a discontinued, unencrypted
+    // format (spec/encryption.md section 4). It is neither read nor migrated.
+    UnsupportedJournal,
     BadOtsProof,
     SegmentNotSealed,
     // The embedding surface (spec/semantic.md sections 5, 7): the artifact
@@ -29,6 +39,8 @@ pub const RunError = error{
     core.journal.Journal.VerifyError || core.journal.Journal.RedactError ||
     core.journal.Journal.CheckAnchorsError || core.journal.Journal.WriteAnchorError ||
     core.journal.Journal.CheckOtsAnchorsError || core.journal.Journal.OtsCheckFailure ||
+    core.vault.MetaError ||
+    key.resolve.CreateError || key.resolve.LoadError ||
     core.ots.VerifyError ||
     core.view.RenderError || core.dstore.PackError || core.dstore.StatusError ||
     core.dstore.RebuildError || core.dstore.LoadEmbedError || File.OpenError || File.Writer.Error ||

@@ -45,7 +45,7 @@ pub fn run(
         return error.TargetNotFound;
     }
 
-    const journal = try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path);
+    const journal = try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path, false);
     defer journal.close();
     _ = try cli_journal.verifyOrReport(arena, io, style, err_file, &journal);
 

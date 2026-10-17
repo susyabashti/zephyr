@@ -290,12 +290,13 @@ pub fn renderFile(allocator: Allocator, header: *const FileHeader, recs: []const
 }
 
 /// Rebuilds a segment file with the payloads at `record_indexes` replaced
-/// by the 35-byte redaction placeholder. Everything outside the payload
-/// region is byte-identical; the `payload_region_len` file-header field is
-/// updated (spec sections 4 and 6).
+/// by the given redaction placeholder (the 35-byte v1 form or the 41-byte
+/// v2 envelope, spec/encryption.md section 2). Everything outside the
+/// payload region is byte-identical; the `payload_region_len` file-header
+/// field is updated (spec sections 4 and 6).
 pub const RedactPayloadsError = Allocator.Error || SummaryError || error{BadRecordIndex};
 
-pub fn redactPayloads(allocator: Allocator, bytes: []const u8, record_indexes: []const usize) RedactPayloadsError![]u8 {
+pub fn redactPayloads(allocator: Allocator, bytes: []const u8, record_indexes: []const usize, placeholder: []const u8) RedactPayloadsError![]u8 {
     const sum = try summary(bytes);
     const n: usize = @intCast(sum.record_count);
     const header_region_end = FileHeaderLen + records.RecordBlockLen * n;
@@ -322,7 +323,7 @@ pub fn redactPayloads(allocator: Allocator, bytes: []const u8, record_indexes: [
     }
 
     var new_payload_region_len: usize = 0;
-    for (0..n) |k| new_payload_region_len += 4 + if (mark.items[k]) records.PlaceholderLen else lens.items[k];
+    for (0..n) |k| new_payload_region_len += 4 + if (mark.items[k]) placeholder.len else lens.items[k];
 
     const total = FileHeaderLen + records.RecordBlockLen * n +
         new_payload_region_len + if (sum.sealed) FooterLen else 0;
@@ -338,11 +339,11 @@ pub fn redactPayloads(allocator: Allocator, bytes: []const u8, record_indexes: [
     while (i < n) : (i += 1) {
         const len = lens.items[i];
         const redacted = mark.items[i];
-        const out_len: usize = if (redacted) records.PlaceholderLen else len;
+        const out_len: usize = if (redacted) placeholder.len else len;
         records.putU32(out[dst .. dst + 4], @intCast(out_len));
         dst += 4;
         if (redacted) {
-            @memcpy(out[dst .. dst + records.PlaceholderLen], &records.Payload.redactedPlaceholder);
+            @memcpy(out[dst .. dst + placeholder.len], placeholder);
         } else {
             @memcpy(out[dst .. dst + len], bytes[src + 4 .. src + 4 + len]);
         }

@@ -11,6 +11,7 @@ const pager = @import("pager.zig");
 const editor = @import("editor.zig");
 const log_cmd = @import("commands/log.zig");
 const edit_cmd = @import("commands/edit.zig");
+const key_cmd = @import("commands/key.zig");
 
 test "cli render modules instantiate" {
     _ = views;
@@ -20,4 +21,5 @@ test "cli render modules instantiate" {
     _ = editor;
     _ = log_cmd;
     _ = edit_cmd;
+    _ = key_cmd;
 }

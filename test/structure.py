@@ -40,9 +40,10 @@ ALLOWED_MODULES = {
     "core": {"zephyr_core"},
     "mcp": {"zephyr_core"},
     "embed": {"zephyr_core", "embed_options"},
+    "key": {"zephyr_core"},
     "main": set(),
-    "cli": {"zephyr_core", "zephyr_mcp", "zephyr_embed"},
-    "commands": {"zephyr_core", "zephyr_mcp", "zephyr_embed"},
+    "cli": {"zephyr_core", "zephyr_mcp", "zephyr_embed", "zephyr_key"},
+    "commands": {"zephyr_core", "zephyr_mcp", "zephyr_embed", "zephyr_key"},
 }
 
 # Which zones a relative import may resolve into, per zone.
@@ -50,7 +51,8 @@ REL_OK = {
     "core": {"core"},
     "mcp": {"mcp"},
     "embed": {"embed"},
-    "main": {"main", "core", "mcp", "embed", "cli", "commands"},
+    "key": {"key"},
+    "main": {"main", "core", "mcp", "embed", "key", "cli", "commands"},
     "cli": {"cli", "commands"},
     "commands": {"cli"},
 }
@@ -71,6 +73,8 @@ def zone_of(path):
         return "mcp"
     if r == "src/embed.zig" or r.startswith("src/embed/"):
         return "embed"
+    if r == "src/key.zig" or r.startswith("src/key/"):
+        return "key"
     if r.startswith("src/cli/"):
         return "commands" if r.startswith("src/cli/commands/") else "cli"
     return None
@@ -102,7 +106,7 @@ def check_imports(path, text):
         line = line_of(text, m.start())
         if name in ("std", "builtin") or name in OPTION_MODULES:
             continue
-        if name in ("zephyr_core", "zephyr_mcp", "zephyr_embed"):
+        if name in ("zephyr_core", "zephyr_mcp", "zephyr_embed", "zephyr_key"):
             if name not in allowed:
                 problems.append(
                     f"{rel(path)}:{line}: imports module {name} "

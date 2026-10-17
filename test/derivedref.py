@@ -41,6 +41,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import reference
+import vaultref
 
 BIN_DEFAULT = os.path.join(HERE, "..", "zig-out", "bin", "zephyr")
 WORK_DIR = os.path.join(HERE, "..", ".tmp-derivedref")
@@ -153,11 +154,10 @@ def fixture_journal():
 
 
 def write_journal(journal_dir):
-    files, head = reference.render_journal(fixture_journal())
-    for name, data in files.items():
-        with open(os.path.join(journal_dir, name), "wb") as f:
-            f.write(data)
-    return head
+    # Born encrypted (spec/encryption.md v2): the CLI refuses a journal
+    # that has segments and no meta file. The fixture key is vaultref's
+    # fixed test key, written as a 0600 zephyr.key the CLI loads.
+    return vaultref.install_v2(journal_dir, fixture_journal())
 
 
 # ---------------------------------------------------------------- tokenizer / view
@@ -251,15 +251,24 @@ def decode_journal_dir(journal_dir):
             payloads = payloads[4 + plen:]
             text, tags = "", []
             if rtype in (1, 2):
-                body = payload[32:]
-                tlen = struct.unpack(">H", body[:2])[0]
-                text = body[2:2 + tlen].decode("utf-8")
-                rest = body[2 + tlen:]
-                off = 1
-                for _ in range(rest[0]):
-                    tlen2 = rest[off]
-                    tags.append(rest[off + 1:off + 1 + tlen2].decode("utf-8"))
-                    off += 1 + tlen2
+                # A v2 envelope (or the 41-byte placeholder) after the CLI
+                # wrote the fixture, or after `zephyr log` appended. The
+                # placeholder carries no text; everything else opens under
+                # the fixture key.
+                if vaultref.is_placeholder_v2(payload):
+                    pass
+                elif payload[:1] == bytes([vaultref.FORMAT_V2]):
+                    text, tags = vaultref.payload_plaintext(prefix, payload)
+                else:
+                    body = payload[32:]
+                    tlen = struct.unpack(">H", body[:2])[0]
+                    text = body[2:2 + tlen].decode("utf-8")
+                    rest = body[2 + tlen:]
+                    off = 1
+                    for _ in range(rest[0]):
+                        tlen2 = rest[off]
+                        tags.append(rest[off + 1:off + 1 + tlen2].decode("utf-8"))
+                        off += 1 + tlen2
             recs.append((seq, {
                 "type": {1: "entry", 2: "amendment", 3: "tombstone",
                          4: "redaction", 5: "checkpoint"}[rtype],
@@ -738,7 +747,7 @@ def run_gate(binary):
         # the wall clock produced; the state is re-derived from disk).
         files = [(name, read(os.path.join(journal_dir, name)))
                  for name in sorted(os.listdir(journal_dir)) if name.endswith(".zph")]
-        count2, redacted2, head2 = reference.verify(files)
+        count2, redacted2, head2 = vaultref.verify_v2(files)
         recs = decode_journal_dir(journal_dir)
         ves = visible_entries(recs)
         expect(count2 == len(recs), f"record count: disk {len(recs)} vs verify {count2}")

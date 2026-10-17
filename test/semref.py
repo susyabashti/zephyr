@@ -46,6 +46,7 @@ sys.path.insert(0, HERE)
 
 import derivedref
 import reference
+import vaultref
 
 BIN_DEFAULT = os.path.join(HERE, "..", "zig-out", "bin", "zephyr")
 WORK_DIR = os.path.join(HERE, "..", ".tmp-semref")
@@ -149,11 +150,9 @@ def journal_from_spec(spec):
 
 
 def write_journal(journal_dir, spec):
-    files, head = reference.render_journal(journal_from_spec(spec))
-    for name, data in files.items():
-        with open(os.path.join(journal_dir, name), "wb") as f:
-            f.write(data)
-    return head
+    # Born encrypted (spec/encryption.md v2). derivedref.decode_journal_dir
+    # opens the envelopes under vaultref's fixture key.
+    return vaultref.install_v2(journal_dir, journal_from_spec(spec))
 
 
 # ---------------------------------------------------------------- ZDE1

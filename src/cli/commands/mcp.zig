@@ -3,7 +3,6 @@
 //! exist unless --allow-write is set (then a fresh journal is created).
 
 const std = @import("std");
-const core = @import("zephyr_core");
 const mcp = @import("zephyr_mcp");
 const errors = @import("../errors.zig");
 const output = @import("../output.zig");
@@ -31,10 +30,7 @@ pub fn run(
             return error.Usage;
         }
     }
-    const journal = if (allow_write)
-        try core.journal.Journal.open(arena, io, environ_map, path, true)
-    else
-        try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path);
+    const journal = try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path, allow_write);
     defer journal.close();
     var server = mcp.server.Server.init(&journal, allow_write);
     return server.run(arena, io);

@@ -37,6 +37,22 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // Key module (spec/encryption.md): the master key's stores — the macOS
+    // keychain or the 0600 key file — and resolution. Depends on core for
+    // the vault format. On macOS the Security and CoreFoundation
+    // frameworks back the keychain store; off macOS the module is a stub.
+    const key = b.addModule("zephyr_key", .{
+        .root_source_file = b.path("src/key.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "zephyr_core", .module = core },
+        },
+    });
+    if (target.result.os.tag == .macos) {
+        key.linkFramework("Security", .{});
+        key.linkFramework("CoreFoundation", .{});
+    }
+
     const exe = b.addExecutable(.{
         .name = "zephyr",
         .root_module = b.createModule(.{
@@ -47,6 +63,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "zephyr_core", .module = core },
                 .{ .name = "zephyr_mcp", .module = mcp },
                 .{ .name = "zephyr_embed", .module = embed },
+                .{ .name = "zephyr_key", .module = key },
             },
         }),
     });
@@ -277,6 +294,18 @@ pub fn build(b: *std.Build) void {
     const phase8_tests = b.addTest(.{ .root_module = phase8_module });
     const run_phase8_tests = b.addRunArtifact(phase8_tests);
 
+    // Encryption gate (spec/encryption.md): born-encrypted round trip,
+    // verify with the key, LLM-view invariance vs a v1 twin.
+    const vault_module = b.createModule(.{
+        .root_source_file = b.path("test/vault.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "zephyr_core", .module = core },
+        },
+    });
+    const vault_tests = b.addTest(.{ .root_module = vault_module });
+    const run_vault_tests = b.addRunArtifact(vault_tests);
+
     // Phase 5b: OpenTimestamps proof format (pinned vectors + corruption
     // suite), and the stamp/verify/redaction gates on an on-disk journal.
     const ots_module = b.createModule(.{
@@ -317,6 +346,10 @@ pub fn build(b: *std.Build) void {
         "src/core/records.zig",
         "src/core/segment.zig",
         "src/core/journal.zig",
+        "src/core/vault.zig",
+        // Key module: the key file store's disk paths (the keychain store
+        // is smoke-tested manually; it cannot run in CI).
+        "src/key/keyfile.zig",
         "src/core/view.zig",
         "src/core/nfc.zig",
         "src/core/timezone.zig",
@@ -339,9 +372,17 @@ pub fn build(b: *std.Build) void {
         const module = b.createModule(.{
             .root_source_file = b.path(path),
             .target = target,
-            // The CLI-layer files in this list import core by module name;
-            // the rest simply don't use it.
-            .imports = &.{.{ .name = "zephyr_core", .module = core }},
+            // The CLI-layer files in this list import the project modules
+            // by name (the key command reaches cli's error union, which
+            // names every surface); the rest simply don't use them. The
+            // engine is never instantiated here: the test graph references
+            // only the embed module's error type, so no llama link.
+            .imports = &.{
+                .{ .name = "zephyr_core", .module = core },
+                .{ .name = "zephyr_mcp", .module = mcp },
+                .{ .name = "zephyr_embed", .module = embed },
+                .{ .name = "zephyr_key", .module = key },
+            },
         });
         const core_tests = b.addTest(.{ .root_module = module });
         const run_core_tests = b.addRunArtifact(core_tests);
@@ -358,6 +399,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_phase6_tests.step);
     test_step.dependOn(&run_phase7_tests.step);
     test_step.dependOn(&run_phase8_tests.step);
+    test_step.dependOn(&run_vault_tests.step);
 
     const fmt_step = b.step("fmt", "Run format checks");
     fmt_step.dependOn(&b.addFmt(.{ .paths = b.pathList(&.{ "src", "test", "build.zig" }) }).step);

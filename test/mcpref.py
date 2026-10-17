@@ -42,6 +42,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import reference
+import vaultref
 
 BIN_DEFAULT = os.path.join(HERE, "..", "zig-out", "bin", "zephyr")
 WORK_DIR = os.path.join(HERE, "..", ".tmp-mcpref")
@@ -91,12 +92,12 @@ def fixture_journal():
 
 
 def write_journal(journal_dir):
-    """Renders the fixture with the reference implementation into the dir."""
-    files, head = reference.render_journal(fixture_journal())
-    for name, data in files.items():
-        with open(os.path.join(journal_dir, name), "wb") as f:
-            f.write(data)
-    return head
+    """Renders a born-encrypted fixture (spec/encryption.md v2).
+
+    The CLI refuses a journal with segments and no meta file. The fixture
+    key is vaultref's fixed test key, written as a 0600 zephyr.key.
+    """
+    return vaultref.install_v2(journal_dir, fixture_journal())
 
 
 # ---------------------------------------------------------------- client

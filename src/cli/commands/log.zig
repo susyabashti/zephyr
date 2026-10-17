@@ -40,7 +40,7 @@ pub fn run(
         }
     }
     const now_ms = cli_journal.nowMs(io);
-    const journal = try core.journal.Journal.open(arena, io, environ_map, path, true);
+    const journal = try cli_journal.openReadJournal(arena, io, style, File.stderr(), environ_map, path, true);
     defer journal.close();
     // Verify before trust: never extend a failing journal.
     const pre = try journal.verify(arena);

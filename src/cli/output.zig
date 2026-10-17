@@ -143,6 +143,9 @@ pub fn printUsage(file: File, io: Io) File.Writer.Error!void {
         \\                                   use of the embedding surface)
         \\  zephyr model status             where the model lives, and
         \\                                   whether it matches the pin
+        \\  zephyr key status               where the journal's master key
+        \\                                   lives (the store pinned in the
+        \\                                   journal's meta file)
         \\  zephyr edit <seq> [-t TAG]... "text"
         \\                                   amend an entry (tags kept unless
         \\                                   -t is given); with only a seq

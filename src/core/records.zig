@@ -149,30 +149,41 @@ pub const Payload = struct {
     pub const redactedPlaceholder: [PlaceholderLen]u8 = @splat(0);
 };
 
-pub fn payloadSize(text: []const u8, tags: []const []const u8) usize {
-    var size: usize = SaltLen + 2 + text.len + 1;
+/// The v1 payload body: `text_len` ‖ `text` ‖ `tag_count` ‖ tags — the
+/// payload without its salt. The body is what a v2 envelope seals
+/// (spec/encryption.md section 2).
+pub fn bodySize(text: []const u8, tags: []const []const u8) usize {
+    var size: usize = 2 + text.len + 1;
     for (tags) |tag| size += 1 + tag.len;
     return size;
 }
 
-pub fn encodePayload(payload: *const Payload, buf: []u8) void {
-    assert(buf.len == payloadSize(payload.text, payload.tags));
+pub fn payloadSize(text: []const u8, tags: []const []const u8) usize {
+    return SaltLen + bodySize(text, tags);
+}
+
+pub fn encodeBody(buf: []u8, text: []const u8, tags: []const []const u8) void {
+    assert(buf.len == bodySize(text, tags));
     var w: usize = 0;
-    @memcpy(buf[w .. w + SaltLen], &payload.salt);
-    w += SaltLen;
-    putU16(buf[w .. w + 2], @intCast(payload.text.len));
+    putU16(buf[w .. w + 2], @intCast(text.len));
     w += 2;
-    @memcpy(buf[w .. w + payload.text.len], payload.text);
-    w += payload.text.len;
-    buf[w] = @intCast(payload.tags.len);
+    @memcpy(buf[w .. w + text.len], text);
+    w += text.len;
+    buf[w] = @intCast(tags.len);
     w += 1;
-    for (payload.tags) |tag| {
+    for (tags) |tag| {
         buf[w] = @intCast(tag.len);
         w += 1;
         @memcpy(buf[w .. w + tag.len], tag);
         w += tag.len;
     }
     assert(w == buf.len);
+}
+
+pub fn encodePayload(payload: *const Payload, buf: []u8) void {
+    assert(buf.len == payloadSize(payload.text, payload.tags));
+    @memcpy(buf[0..SaltLen], &payload.salt);
+    encodeBody(buf[SaltLen..], payload.text, payload.tags);
 }
 
 pub const DecodePayloadError = Allocator.Error || nfc.Error || error{
@@ -186,8 +197,20 @@ pub const DecodePayloadError = Allocator.Error || nfc.Error || error{
 /// caller must free it (`allocator.free(payload.tags)`).
 pub fn decodePayload(allocator: Allocator, bytes: []const u8) DecodePayloadError!Payload {
     if (bytes.len < PlaceholderLen) return error.Truncated;
-    const text_len: usize = readU16(bytes[SaltLen..][0..2]);
-    const text_start: usize = SaltLen + 2;
+    var payload = decodeBody(allocator, bytes[SaltLen..]) catch |err| return err;
+    var salt: [SaltLen]u8 = undefined;
+    @memcpy(&salt, bytes[0..SaltLen]);
+    payload.salt = salt;
+    return payload;
+}
+
+/// Decodes a v1 payload body (see `encodeBody`). The returned text and tag
+/// bytes borrow from `bytes`; the tags slice-header array is owned by
+/// `allocator` (free `payload.tags`). The `salt` field is zeroed.
+pub fn decodeBody(allocator: Allocator, bytes: []const u8) DecodePayloadError!Payload {
+    if (bytes.len < 3) return error.Truncated;
+    const text_len: usize = readU16(bytes[0..2]);
+    const text_start: usize = 2;
     const text_end = text_start + text_len;
     if (text_end + 1 > bytes.len) return error.Truncated;
     const text = bytes[text_start..text_end];
@@ -214,9 +237,7 @@ pub fn decodePayload(allocator: Allocator, bytes: []const u8) DecodePayloadError
     if (w != bytes.len) return error.Truncated;
     try nfc.checkText(text);
 
-    var salt: [SaltLen]u8 = undefined;
-    @memcpy(&salt, bytes[0..SaltLen]);
-    return Payload{ .salt = salt, .text = text, .tags = tags };
+    return Payload{ .salt = @splat(0), .text = text, .tags = tags };
 }
 
 pub fn isRedactedPlaceholder(bytes: []const u8) bool {

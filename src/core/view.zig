@@ -76,10 +76,12 @@ pub fn visibleEntries(allocator: Allocator, headers: []const records.Header, pay
     const edited = try allocator.alloc(bool, n);
     // Every decodePayload call allocates a tag slice-header array, even when
     // the result is discarded or later overwritten; track all of them so none
-    // leak.
+    // leak. Only decoded records own an array: the slots a failed decode
+    // never reached are uninitialised and must not be freed.
     const tag_slices = try allocator.alloc([]const []const u8, n);
+    var tag_decoded: usize = 0;
     errdefer {
-        freeTagSlices(allocator, tag_slices);
+        freeTagSlices(allocator, tag_slices[0..tag_decoded]);
         allocator.free(edited);
         allocator.free(effective_tags);
         allocator.free(effective_text);
@@ -97,6 +99,7 @@ pub fn visibleEntries(allocator: Allocator, headers: []const records.Header, pay
         const h = headers[i];
         const payload = try records.decodePayload(allocator, payloads[i]);
         tag_slices[i] = payload.tags;
+        tag_decoded += 1;
         types[i] = h.record_type;
         is_private[i] = h.isPrivate();
         switch (h.record_type) {
@@ -160,7 +163,7 @@ pub fn visibleEntries(allocator: Allocator, headers: []const records.Header, pay
     errdefer allocator.free(owned_tag_lists);
     // Success path: release the first-pass scratch arrays (the errdefer above
     // covers them on error, but never runs after this point).
-    freeTagSlices(allocator, tag_slices);
+    freeTagSlices(allocator, tag_slices[0..tag_decoded]);
     allocator.free(edited);
     allocator.free(effective_tags);
     allocator.free(effective_text);
@@ -531,6 +534,42 @@ test "visibleEntries: amendments, tombstones, private, ordering" {
     // Latest amendment wins, and the entry is marked edited.
     try std.testing.expectEqualStrings("amended", visible.entries[1].text);
     try std.testing.expect(visible.entries[1].edited);
+}
+
+test "visibleEntries: a decode failure mid-stream fails cleanly" {
+    // Regression: the per-record tag arrays live in an array that a failed
+    // decode only fills partially. The error path must free only the
+    // decoded prefix; freeing the uninitialised tail is a free of a garbage
+    // slice header, which in 0.17 becomes an unbounded memset (the
+    // post-migration `ask` hang).
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const genesis = records.Header.GenesisHash;
+    const ok = try makeEntry(allocator, "fine", 1_767_225_600_000, 0, &genesis);
+    var bad = try makeEntry(allocator, "broken", 1_767_225_660_000, 0, &ok.header.record_hash);
+    bad.header.seq = 1;
+    bad.header.record_hash = recompute(&bad.header, &ok.header.record_hash);
+    // A well-sized payload that declares a 255-byte text: decodeBody
+    // rejects it as Truncated. The declaration sits after the 32-byte salt.
+    var truncated: [records.PlaceholderLen]u8 = undefined;
+    @memset(&truncated, 0);
+    records.putU16(truncated[records.SaltLen .. records.SaltLen + 2], 255);
+    // Poison the arena's next region so any uninitialised tail the error
+    // path forgets to skip holds a garbage slice header, not zeros.
+    const poison = try allocator.alloc(u8, 1024);
+    @memset(poison, 0xAA);
+    allocator.free(poison);
+
+    const headers = [_]records.Header{ ok.header, bad.header };
+    const payloads = [_][]const u8{ ok.payload, &truncated };
+
+    try std.testing.expectError(
+        error.Truncated,
+        visibleEntries(allocator, &headers, &payloads),
+    );
 }
 
 fn recompute(header: *records.Header, prev: *const [records.DigestLen]u8) [records.DigestLen]u8 {
