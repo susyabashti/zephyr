@@ -162,6 +162,7 @@ jobs:
           find third_party/llama.cpp -type f -exec touch -t 202001010000 {} +
           git -C third_party/llama.cpp update-index --refresh
       - name: Build (ReleaseFast)
+        run: zig build -Doptimize=ReleaseFast
       # The key embeds the pinned sha256 (src/embed/model.zig): a changed
       # pin misses the cache, and `model fetch` re-verifies any cached file.
       - name: Embedding model (cached)
