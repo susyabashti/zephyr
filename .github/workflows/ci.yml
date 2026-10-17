@@ -11,6 +11,11 @@ on:
 env:
   ZIG_VERSION: 0.17.0
 
+# A new push or PR commit supersedes in-flight runs for the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: build + tests + gates (${{ matrix.runner }})
