@@ -57,28 +57,39 @@ jobs:
           echo "${GITHUB_WORKSPACE}/zig-toolchain" >> "$GITHUB_PATH"
           ./zig-toolchain/zig version
       # Key inputs: the pinned submodule revision, build.zig (the whole
-      # cmake invocation lives there), and the host C++ compiler (the real
+      # cmake invocation lives there), the host C++ compiler (the real
       # compiler on macOS; on Linux the engine is built by zig cc/c++, which
-      # ZIG_VERSION already pins). Any change -> new key -> clean build.
-      - name: Cache key inputs (submodule pin, build.zig, compiler)
+      # ZIG_VERSION already pins), and the runner CPU's instruction set.
+      # The engine is compiled with -march=native, so a build is only
+      # safe to restore onto a CPU that has every feature the build CPU
+      # had (the x64 runner fleet mixes AVX-512 and AVX-512-less Xeons;
+      # an AVX-512 build restored onto an older CPU SIGILLs at runtime).
+      # Any change -> new key -> clean build.
+      - name: Cache key inputs (submodule pin, build.zig, compiler, cpu)
         id: pins
         run: |
           set -eu
           llama_pin="$(git -C third_party/llama.cpp rev-parse HEAD)"
           build_hash="$( (shasum -a 256 build.zig 2>/dev/null || sha256sum build.zig) | cut -d' ' -f1 )"
           cc_hash="$(c++ --version | head -n 1 | (shasum -a 256 2>/dev/null || sha256sum) | cut -d' ' -f1 )"
+          if [ -r /proc/cpuinfo ]; then
+            cpu_sig="$(grep -m1 '^flags' /proc/cpuinfo | (shasum -a 256 2>/dev/null || sha256sum) | cut -d' ' -f1 | cut -c1-16)"
+          else
+            cpu_sig="$(sysctl -n machdep.cpu.brand_string 2>/dev/null | (shasum -a 256 2>/dev/null || sha256sum) | cut -d' ' -f1 | cut -c1-16)"
+          fi
           {
             echo "llama=$llama_pin"
             echo "build=$build_hash"
             echo "cc=$cc_hash"
+            echo "cpu=$cpu_sig"
           } >> "$GITHUB_OUTPUT"
       # Warm cache => cmake reconfigure is a no-op and ninja has nothing to
-      # do; a miss rebuilds the static library set for this OS/arch.
+      # do; a miss rebuilds the static library set for this OS/arch/cpu.
       - name: llama.cpp build cache
         uses: actions/cache@v6
         with:
           path: zig-out/llama
-          key: llama-${{ runner.os }}-${{ runner.arch }}-zig${{ env.ZIG_VERSION }}-llama${{ steps.pins.outputs.llama }}-bld${{ steps.pins.outputs.build }}-cc${{ steps.pins.outputs.cc }}
+          key: llama-${{ runner.os }}-${{ runner.arch }}-zig${{ env.ZIG_VERSION }}-llama${{ steps.pins.outputs.llama }}-bld${{ steps.pins.outputs.build }}-cc${{ steps.pins.outputs.cc }}-cpu${{ steps.pins.outputs.cpu }}
       # A fresh checkout stamps every source with the current mtime, and
       # ninja (mtime-based) would see them as newer than the cached objects
       # and rebuild all targets. Pin the sources to a fixed old date; content
@@ -96,25 +107,26 @@ jobs:
           git -C third_party/llama.cpp update-index --refresh
       - name: Build (ReleaseFast)
         run: zig build -Doptimize=ReleaseFast
-      # TEMPORARY (remove once the x64 mcp SIGILL is diagnosed). Rebuilds
-      # the crash machine's ISA profile: baseline-target zig code (what a
-      # native build yields on an AVX-512-less host) + the cached AVX-512
-      # ggml objects, run under qemu (TCG: no AVX at all) with a gdbstub
-      # backtrace at the trap. Plus: what CPU did zig detect natively here,
-      # and a control run of the host-native binary under qemu.
-      - name: mcp SIGILL diagnostics v4 (temporary, x64)
+      # TEMPORARY (remove once the x64 mcp SIGILL is confirmed fixed). The
+      # cache key now includes the CPU ISA, so the flake should not recur;
+      # this step stays as a canary: (1) the host-native binary under qemu
+      # (TCG has no AVX at all) - the first trapping AVX instruction on the
+      # mcp startup path, resolved to a function; (2) a baseline
+      # --no-embed binary (the crash machines' zig-code profile, no ggml
+      # linked) - expected to run clean, proving the mcp path itself is
+      # baseline-safe.
+      - name: mcp SIGILL canary (temporary, x64)
         if: runner.arch == 'X64'
         run: |
+          set +e
           B=./zig-out/bin/zephyr
           D=$(mktemp -d)
           echo "--- cpu ---"
           grep -m1 'model name' /proc/cpuinfo || true
           grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' | grep -E '^(avx|f16c|bmi2|movbe|fma)' | sort | tr '\n' ' '; echo
-          echo "--- zig native target here ---"
-          ./zig-toolchain/zig env | grep -E '^\s+\.target' || true
-          if ! command -v gdb >/dev/null || ! command -v qemu-x86_64 >/dev/null; then
+          if ! command -v qemu-x86_64 >/dev/null; then
             sudo apt-get update -qq >/dev/null 2>&1 || true
-            sudo apt-get install -y -qq gdb qemu-user >/dev/null 2>&1 || true
+            sudo apt-get install -y -qq qemu-user >/dev/null 2>&1 || true
           fi
           python3 - "$D" <<'PY'
           import sys
@@ -125,38 +137,33 @@ jobs:
           printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"diag","version":"0"},"capabilities":{}}}\n' > "$D/init.json"
           printf '#!/bin/sh\nexec "$1" --journal "%s" mcp < "%s/init.json"\n' "$D" "$D" > "$D/run.sh"
           chmod +x "$D/run.sh"
-          cp "$B" "$D/native"
           USN=$(find .zig-cache/o -maxdepth 2 -type f -name zephyr -exec ls -S {} + 2>/dev/null | head -1 || true)
-          echo "native unstripped: ${USN:-none}"
-          # (1) CONTROL: host-native binary under qemu (expect a trap in the
-          # zig AVX code - proves the mechanism and the tooling). Runs BEFORE
-          # the baseline rebuild overwrites zig-out/bin/zephyr.
-          qemu-x86_64 -d in_asm -D "$D/q1.log" -cpu max -g 3998 "$D/run.sh" "$D/native" > "$D/q1.out" 2> "$D/q1.err" &
-          sleep 3
-          gdb -batch -ex 'set pagination off' -ex "file ${USN:-$D/native}" -ex 'target remote :3998' \
-            -ex continue -ex 'echo ==PC==\n' -ex 'x/1i $pc' \
-            -ex 'echo ==SYM==\n' -ex 'info symbol $pc' -ex 'echo ==BT==\n' -ex 'bt 30' > "$D/g1.txt" 2>&1 || true
-          wait; echo "control: qemu/gdb done"
-          echo '--- control: qemu stderr ---'; cat "$D/q1.err"
-          echo '--- control: gdb ---'; tail -45 "$D/g1.txt"
-          # Baseline-target rebuild: baseline zig code + cached AVX-512 ggml
-          # = the exact ISA profile of the crash machines.
-          touch "$D/marker"
-          zig build -Dtarget=x86_64-linux -Doptimize=ReleaseFast || echo 'baseline build FAILED'
-          US=$(find .zig-cache/o -maxdepth 2 -type f -name zephyr -newer "$D/marker" -exec ls -S {} + 2>/dev/null | head -1 || true)
-          echo "baseline unstripped: ${US:-none}"
-          # (2) THE ANSWER: baseline binary under qemu. A trap here is in the
-          # cached ggml code (the only AVX+ code left); clean exit means the
-          # mcp path never reaches it.
-          qemu-x86_64 -d in_asm -D "$D/q2.log" -cpu max -g 3999 "$D/run.sh" "$B" > "$D/q2.out" 2> "$D/q2.err" &
-          sleep 3
-          gdb -batch -ex 'set pagination off' -ex "file ${US:-$B}" -ex 'target remote :3999' \
-            -ex continue -ex 'echo ==PC==\n' -ex 'x/1i $pc' \
-            -ex 'echo ==SYM==\n' -ex 'info symbol $pc' -ex 'echo ==BT==\n' -ex 'bt 30' > "$D/g2.txt" 2>&1 || true
-          wait; echo "baseline: qemu/gdb done"
-          echo '--- baseline: qemu stderr ---'; cat "$D/q2.err"
-          echo '--- baseline: stdout ---'; cat "$D/q2.out"
-          echo '--- baseline: gdb ---'; tail -45 "$D/g2.txt"
+          objdump -d "${USN:-$B}" > "$D/dis.txt" 2>/dev/null || objdump -d "$B" > "$D/dis.txt"
+          map_fn() {
+            line=$(grep 'in_asm' "$1" 2>/dev/null | tail -1 || true)
+            [ -z "$line" ] && { echo '(no in_asm line - no trap captured)'; return 0; }
+            echo "trapping insn: $line"
+            addr=$(echo "$line" | grep -oE '[0-9a-f]{8,}' | head -1 || true)
+            a6=${addr: -6}
+            awk -v a="${addr:-__none__}" -v s="${a6:-__none__}" '
+              /^[0-9a-f]+ </ { lbl=$0 }
+              a != "__none__" && index($0, a) > 0 && $0 !~ /</ { print "fn: " lbl; print $0; exit }
+              s != "__none__" && index($0, s) > 0 && $0 !~ /</ { if (!m) { print "fn(suffix): " lbl; print $0; m=1 } }
+            ' "$2" | head -4
+          }
+          echo '=== (1) native binary under qemu (TCG: no AVX) ==='
+          qemu-x86_64 -d in_asm -D "$D/q1.log" -cpu max "$D/run.sh" "$B" > "$D/q1.out" 2> "$D/q1.err"
+          echo "exit=$?"
+          echo '--- stdout ---'; cat "$D/q1.out"
+          echo '--- stderr ---'; cat "$D/q1.err"
+          map_fn "$D/q1.log" "$D/dis.txt"
+          echo '=== (2) baseline --no-embed binary under qemu (expect clean) ==='
+          zig build -Dtarget=x86_64-linux --no-embed -Doptimize=ReleaseFast --prefix "$D/base" || echo 'no-embed baseline build FAILED'
+          qemu-x86_64 -d in_asm -D "$D/q2.log" -cpu max "$D/run.sh" "$D/base/bin/zephyr" > "$D/q2.out" 2> "$D/q2.err"
+          echo "exit=$?"
+          echo '--- stdout ---'; cat "$D/q2.out"
+          echo '--- stderr ---'; cat "$D/q2.err"
+          map_fn "$D/q2.log" "$D/dis.txt"
           true
       - name: Unit + phase tests
         run: zig build test
@@ -199,24 +206,31 @@ jobs:
           mv "${name%.tar.xz}" zig-toolchain
           echo "${GITHUB_WORKSPACE}/zig-toolchain" >> "$GITHUB_PATH"
           ./zig-toolchain/zig version
-      # Same cache as the macos-15 matrix job: identical key inputs.
-      - name: Cache key inputs (submodule pin, build.zig, compiler)
+      # Same cache as the macos-15 matrix job: identical key inputs
+      # (including the CPU signature - see the test job's pins step).
+      - name: Cache key inputs (submodule pin, build.zig, compiler, cpu)
         id: pins
         run: |
           set -eu
           llama_pin="$(git -C third_party/llama.cpp rev-parse HEAD)"
           build_hash="$( (shasum -a 256 build.zig 2>/dev/null || sha256sum build.zig) | cut -d' ' -f1 )"
           cc_hash="$(c++ --version | head -n 1 | (shasum -a 256 2>/dev/null || sha256sum) | cut -d' ' -f1 )"
+          if [ -r /proc/cpuinfo ]; then
+            cpu_sig="$(grep -m1 '^flags' /proc/cpuinfo | (shasum -a 256 2>/dev/null || sha256sum) | cut -d' ' -f1 | cut -c1-16)"
+          else
+            cpu_sig="$(sysctl -n machdep.cpu.brand_string 2>/dev/null | (shasum -a 256 2>/dev/null || sha256sum) | cut -d' ' -f1 | cut -c1-16)"
+          fi
           {
             echo "llama=$llama_pin"
             echo "build=$build_hash"
             echo "cc=$cc_hash"
+            echo "cpu=$cpu_sig"
           } >> "$GITHUB_OUTPUT"
       - name: llama.cpp build cache
         uses: actions/cache@v6
         with:
           path: zig-out/llama
-          key: llama-${{ runner.os }}-${{ runner.arch }}-zig${{ env.ZIG_VERSION }}-llama${{ steps.pins.outputs.llama }}-bld${{ steps.pins.outputs.build }}-cc${{ steps.pins.outputs.cc }}
+          key: llama-${{ runner.os }}-${{ runner.arch }}-zig${{ env.ZIG_VERSION }}-llama${{ steps.pins.outputs.llama }}-bld${{ steps.pins.outputs.build }}-cc${{ steps.pins.outputs.cc }}-cpu${{ steps.pins.outputs.cpu }}
       - name: Pin submodule source mtimes (ninja is mtime-based)
         # See the identical step in the test job: the refresh keeps the
         # ggml-version.h stamp byte-identical to the cached header.
