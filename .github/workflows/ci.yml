@@ -97,17 +97,25 @@ jobs:
       - name: Build (ReleaseFast)
         run: zig build -Doptimize=ReleaseFast
       # TEMPORARY (remove once the x64 mcp SIGILL is diagnosed): reproduce the
-      # mcpref crash scenario in isolation and, if the server dies without
-      # output, capture a gdb backtrace at the trap. Also report the runner
-      # CPU and whether the binary carries AVX-512 (zmm) instructions.
-      - name: mcp SIGILL diagnostics (temporary, x64)
+      # mcpref crash in isolation; on crash, a gdb backtrace at the trap
+      # (resolved against the unstripped binary from .zig-cache), the runner
+      # CPU, and a per-function AVX-512 (zmm) breakdown of the binary.
+      - name: mcp SIGILL diagnostics v2 (temporary, x64)
         if: runner.arch == 'X64'
         run: |
           B=./zig-out/bin/zephyr
           D=$(mktemp -d)
           echo "--- cpu ---"
           grep -m1 'model name' /proc/cpuinfo || true
-          echo "avx512 flags: $(grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' | grep -cE '^avx512' || true)"
+          grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' | grep -E '^(avx|f16c|bmi2|movbe|fma)' | sort | tr '\n' ' '; echo
+          if ! command -v gdb >/dev/null; then
+            sudo apt-get update -qq >/dev/null 2>&1 || true
+            sudo apt-get install -y -qq gdb >/dev/null 2>&1 || true
+          fi
+          command -v gdb >/dev/null && echo 'gdb available' || echo 'gdb UNAVAILABLE'
+          # Unstripped exe (has symbols) for address resolution.
+          US=$(find .zig-cache/o -maxdepth 2 -type f -name zephyr -exec ls -S {} + 2>/dev/null | head -1 || true)
+          echo "unstripped: ${US:-none}"
           python3 - "$D" <<'PY'
           import sys
           sys.path.insert(0, "test")
@@ -115,7 +123,8 @@ jobs:
           mcpref.write_journal(sys.argv[1])
           PY
           printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"diag","version":"0"},"capabilities":{}}}\n' > "$D/init.json"
-          printf '#!/bin/sh\nexec "%s" --journal "%s" mcp < "%s/init.json"\n' "$B" "$D" "$D" > "$D/run.sh"
+          TARGET="${US:-$B}"
+          printf '#!/bin/sh\nexec "%s" --journal "%s" mcp < "%s/init.json"\n' "$TARGET" "$D" "$D" > "$D/run.sh"
           chmod +x "$D/run.sh"
           set +e
           "$D/run.sh" > "$D/out.txt" 2> "$D/err.txt"
@@ -126,20 +135,24 @@ jobs:
           cat "$D/out.txt"
           echo "--- stderr ---"
           cat "$D/err.txt"
-          if [ ! -s "$D/out.txt" ] && [ ! -s "$D/err.txt" ]; then
-            echo '--- no output at all: gdb backtrace ---'
-            if command -v gdb >/dev/null; then
-              gdb -batch -ex 'set pagination off' -ex run -ex bt -ex 'x/4i $pc' --args "$D/run.sh" 2>&1 | tail -50
-            else
-              echo 'gdb not available'
-            fi
+          if [ ! -s "$D/out.txt" ] && [ ! -s "$D/err.txt" ] && command -v gdb >/dev/null; then
+            echo '--- no output at all: gdb at the trap ---'
+            gdb -batch \
+              -ex 'set pagination off' \
+              -ex 'set confirm off' \
+              -ex run \
+              -ex 'echo ==PC==\n' -ex 'x/1i $pc' \
+              -ex 'echo ==SYM==\n' -ex 'info symbol $pc' \
+              -ex 'echo ==BT==\n' -ex 'bt 25' \
+              --args "$D/run.sh" 2>&1 | tail -80
           else
-            echo '--- server produced output; skipping gdb ---'
+            echo '--- no gdb run (output present or no gdb) ---'
           fi
           if command -v objdump >/dev/null; then
+            echo '--- zmm per function (top 20) ---'
             objdump -d "$B" > "$D/dis.txt" || true
-            echo "zmm (AVX-512) refs in zephyr: $(grep -c 'zmm' "$D/dis.txt" || true)"
-            awk '/^[0-9a-f]+ <.*>:/{f=$0} /zmm[0-9]/{print f" :: "substr($0,1,120); n++; if (n>=20) exit}' "$D/dis.txt" || true
+            awk '/^[0-9a-f]+ <.*>:/{f=$2} /zmm[0-9]/{c[f]++} END{for (k in c) print c[k], k}' "$D/dis.txt" | sort -rn | head -20
+            echo "zmm total: $(grep -c 'zmm[0-9]' "$D/dis.txt" || true)"
           fi
           true
       - name: Unit + phase tests
