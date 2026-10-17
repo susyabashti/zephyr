@@ -402,5 +402,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_vault_tests.step);
 
     const fmt_step = b.step("fmt", "Run format checks");
-    fmt_step.dependOn(&b.addFmt(.{ .paths = b.pathList(&.{ "src", "test", "build.zig" }) }).step);
+    fmt_step.dependOn(&b.addFmt(.{
+        .paths = b.pathList(&.{ "src", "test", "build.zig" }),
+        .check = true,
+    }).step);
 }

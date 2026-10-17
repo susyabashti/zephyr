@@ -72,7 +72,7 @@ pub fn encodeMeta(allocator: Allocator, store: Store, key_id: []const u8) MetaEr
     const out = try allocator.alloc(u8, 8 + key_id.len);
     @memcpy(out[0..4], &MetaMagic);
     out[4] = MetaVersion;
-    out[5] = @intFromEnum(store);
+    out[5] = @backingInt(store);
     records.putU16(out[6..8], @intCast(key_id.len));
     @memcpy(out[8..], key_id);
     return out;
