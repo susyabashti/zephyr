@@ -7,6 +7,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 env:
   ZIG_VERSION: 0.17.0
@@ -55,6 +56,29 @@ jobs:
           mv "${name%.tar.xz}" zig-toolchain
           echo "${GITHUB_WORKSPACE}/zig-toolchain" >> "$GITHUB_PATH"
           ./zig-toolchain/zig version
+      # Key inputs: the pinned submodule revision, build.zig (the whole
+      # cmake invocation lives there), and the host C++ compiler (the real
+      # compiler on macOS; on Linux the engine is built by zig cc/c++, which
+      # ZIG_VERSION already pins). Any change -> new key -> clean build.
+      - name: Cache key inputs (submodule pin, build.zig, compiler)
+        id: pins
+        run: |
+          set -eu
+          llama_pin="$(git -C third_party/llama.cpp rev-parse HEAD)"
+          build_hash="$( (shasum -a 256 build.zig 2>/dev/null || sha256sum build.zig) | cut -d' ' -f1 )"
+          cc_hash="$(c++ --version | head -n 1 | (shasum -a 256 2>/dev/null || sha256sum) | cut -d' ' -f1 )"
+          {
+            echo "llama=$llama_pin"
+            echo "build=$build_hash"
+            echo "cc=$cc_hash"
+          } >> "$GITHUB_OUTPUT"
+      # Warm cache => cmake reconfigure is a no-op and ninja has nothing to
+      # do; a miss rebuilds the static library set for this OS/arch.
+      - name: llama.cpp build cache
+        uses: actions/cache@v6
+        with:
+          path: zig-out/llama
+          key: llama-${{ runner.os }}-${{ runner.arch }}-zig${{ env.ZIG_VERSION }}-llama${{ steps.pins.outputs.llama }}-bld${{ steps.pins.outputs.build }}-cc${{ steps.pins.outputs.cc }}
       - name: Build (ReleaseFast)
         run: zig build -Doptimize=ReleaseFast
       - name: Unit + phase tests
@@ -98,6 +122,24 @@ jobs:
           mv "${name%.tar.xz}" zig-toolchain
           echo "${GITHUB_WORKSPACE}/zig-toolchain" >> "$GITHUB_PATH"
           ./zig-toolchain/zig version
+      # Same cache as the macos-15 matrix job: identical key inputs.
+      - name: Cache key inputs (submodule pin, build.zig, compiler)
+        id: pins
+        run: |
+          set -eu
+          llama_pin="$(git -C third_party/llama.cpp rev-parse HEAD)"
+          build_hash="$( (shasum -a 256 build.zig 2>/dev/null || sha256sum build.zig) | cut -d' ' -f1 )"
+          cc_hash="$(c++ --version | head -n 1 | (shasum -a 256 2>/dev/null || sha256sum) | cut -d' ' -f1 )"
+          {
+            echo "llama=$llama_pin"
+            echo "build=$build_hash"
+            echo "cc=$cc_hash"
+          } >> "$GITHUB_OUTPUT"
+      - name: llama.cpp build cache
+        uses: actions/cache@v6
+        with:
+          path: zig-out/llama
+          key: llama-${{ runner.os }}-${{ runner.arch }}-zig${{ env.ZIG_VERSION }}-llama${{ steps.pins.outputs.llama }}-bld${{ steps.pins.outputs.build }}-cc${{ steps.pins.outputs.cc }}
       - name: Build (ReleaseFast)
         run: zig build -Doptimize=ReleaseFast
       # The key embeds the pinned sha256 (src/embed/model.zig): a changed
