@@ -150,8 +150,14 @@ pub fn build(b: *std.Build) void {
             &[_][]const u8{ "llama", "ggml", "ggml-base", "ggml-cpu" };
         embed.addLibraryPath(b.path("zig-out/llama/src"));
         embed.addLibraryPath(b.path("zig-out/llama/ggml/src"));
-        embed.addLibraryPath(b.path("zig-out/llama/ggml/src/ggml-blas"));
-        embed.addLibraryPath(b.path("zig-out/llama/ggml/src/ggml-metal"));
+        // The blas/metal archives only exist on macOS (the pinned cmake
+        // defaults build them only on Apple). Entries for missing
+        // directories make the linker warn on every artifact that imports
+        // this module, so mirror the library set above.
+        if (target.result.os.tag == .macos) {
+            embed.addLibraryPath(b.path("zig-out/llama/ggml/src/ggml-blas"));
+            embed.addLibraryPath(b.path("zig-out/llama/ggml/src/ggml-metal"));
+        }
         for (llama_libs) |name| {
             embed.linkSystemLibrary(name, .{ .use_pkg_config = .no, .preferred_link_mode = .static });
         }
@@ -231,6 +237,11 @@ pub fn build(b: *std.Build) void {
     });
     const phase4_tests = b.addTest(.{ .root_module = phase4_module });
     const run_phase4_tests = b.addRunArtifact(phase4_tests);
+    // Test runs are cached in 0.17 and the environment is not part of the
+    // run manifest, so a cached result would ignore ZEPHYR_TEST_VERBOSE.
+    // Mark the step side-effecting so the gate always runs and the flag
+    // works; the suite is in-memory only, so this costs seconds.
+    run_phase4_tests.has_side_effects = true;
 
     // Phase 5: anchor vectors — RFC 8032 known answers plus the pinned 190-byte
     // artifacts, re-derived from their inputs with std.crypto Ed25519.

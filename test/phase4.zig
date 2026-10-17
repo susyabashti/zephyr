@@ -168,20 +168,38 @@ test "phase 4: tokens per entry beat raw JSON" {
     // to both formats so the comparison is like-for-like.
     const view_tokens: u64 = (rendered.len + 3) / 4;
     const jsonl_tokens: u64 = (jsonl.items.len + 3) / 4;
-
-    std.debug.print("\nphase 4 llm-view gate\n", .{});
-    std.debug.print("  entries:               {d}\n", .{n});
-    std.debug.print("  llm view bytes:        {d}\n", .{rendered.len});
-    std.debug.print("  llm view tokens/entry: {d:.2}\n", .{@as(f64, @floatFromInt(view_tokens)) / @as(f64, @floatFromInt(n))});
-    std.debug.print("  JSONL bytes:           {d}\n", .{jsonl.items.len});
-    std.debug.print("  JSONL tokens/entry:    {d:.2}\n", .{@as(f64, @floatFromInt(jsonl_tokens)) / @as(f64, @floatFromInt(n))});
     const ratio: f64 = @as(f64, @floatFromInt(view_tokens)) / @as(f64, @floatFromInt(jsonl_tokens));
-    std.debug.print("  ratio (llm/JSONL):     {d:.2}\n", .{ratio});
+
+    // The report is off by default: under `zig build test` the runner talks
+    // to the build system on stdout, and any stderr a test emits is shown by
+    // zig build (0.17) in a step-failure report, making a passing gate look
+    // like a crash in CI logs. Enable with ZEPHYR_TEST_VERBOSE=1.
+    if (verboseReportEnabled()) {
+        std.debug.print("\nphase 4 llm-view gate\n", .{});
+        std.debug.print("  entries:               {d}\n", .{n});
+        std.debug.print("  llm view bytes:        {d}\n", .{rendered.len});
+        std.debug.print("  llm view tokens/entry: {d:.2}\n", .{@as(f64, @floatFromInt(view_tokens)) / @as(f64, @floatFromInt(n))});
+        std.debug.print("  JSONL bytes:           {d}\n", .{jsonl.items.len});
+        std.debug.print("  JSONL tokens/entry:    {d:.2}\n", .{@as(f64, @floatFromInt(jsonl_tokens)) / @as(f64, @floatFromInt(n))});
+        std.debug.print("  ratio (llm/JSONL):     {d:.2}\n", .{ratio});
+    }
 
     // The gate: the LLM view beats raw JSON, and stays under the target
     // ceiling (docs/features.md).
     try std.testing.expect(view_tokens < jsonl_tokens);
     try std.testing.expect(view_tokens <= TargetViewTokensTotal);
+}
+
+/// Is ZEPHYR_TEST_VERBOSE set in the process environment? Note that
+/// `Environ.Map.init` returns an *empty* map in 0.17, so the real
+/// environment is read by building an `Environ` over the C environ, the
+/// same way std.start's main entry point does.
+fn verboseReportEnabled() bool {
+    const c_environ = std.c.environ;
+    var count: usize = 0;
+    while (c_environ[count] != null) : (count += 1) {}
+    const environ = std.process.Environ{ .block = .{ .slice = c_environ[0..count :null] } };
+    return std.process.Environ.containsConstant(environ, "ZEPHYR_TEST_VERBOSE");
 }
 
 /// Regression ceiling for the 10k-entry measurement above
