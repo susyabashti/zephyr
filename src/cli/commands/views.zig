@@ -25,7 +25,7 @@ pub fn runDayView(
     which: []const u8,
     no_pager: bool,
 ) errors.RunError!void {
-    const journal = try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path);
+    const journal = try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path, false);
     defer journal.close();
     _ = try cli_journal.verifyOrReport(arena, io, style, err_file, &journal);
     // "Today" is the current civil day in the local timezone.
@@ -55,7 +55,7 @@ pub fn runRangeView(
     range: core.view.DayRange,
     no_pager: bool,
 ) errors.RunError!void {
-    const journal = try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path);
+    const journal = try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path, false);
     defer journal.close();
     _ = try cli_journal.verifyOrReport(arena, io, style, err_file, &journal);
     try renderJournalRange(arena, &journal, style, out, io, environ_map, path, no_pager, range);
@@ -72,7 +72,7 @@ fn renderJournalRange(
     no_pager: bool,
     range: core.view.DayRange,
 ) errors.RunError!void {
-    const recs = try journal.collectRecords(arena);
+    const recs = try journal.collectPlaintext(arena);
     defer recs.deinit();
     // The civil day, for the (today) marker on the day rule.
     const now_ms = cli_journal.nowMs(io);

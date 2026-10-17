@@ -18,3 +18,4 @@ pub const tokens = @import("core/tokens.zig");
 pub const derived = @import("core/derived.zig");
 pub const dstore = @import("core/dstore.zig");
 pub const embed = @import("core/embed.zig");
+pub const vault = @import("core/vault.zig");

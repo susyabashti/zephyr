@@ -27,10 +27,10 @@ pub fn run(
 ) errors.RunError!void {
     const query = try args.joinParts(arena, rest);
     if (query.len == 0) return error.Usage;
-    const journal = try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path);
+    const journal = try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path, false);
     defer journal.close();
     _ = try cli_journal.verifyOrReport(arena, io, style, err_file, &journal);
-    const recs = try journal.collectRecords(arena);
+    const recs = try journal.collectPlaintext(arena);
     defer recs.deinit();
     const visible = try core.view.visibleEntries(arena, recs.headers, recs.payloads);
     defer visible.deinit();

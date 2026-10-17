@@ -23,10 +23,10 @@ pub fn run(
 ) errors.RunError!void {
     if (rest.len != 1) return error.Usage;
     const target = std.fmt.parseInt(u64, rest[0], 10) catch return error.Usage;
-    const journal = try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path);
+    const journal = try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path, false);
     defer journal.close();
     _ = try cli_journal.verifyOrReport(arena, io, style, err_file, &journal);
-    const recs = try journal.collectRecords(arena);
+    const recs = try journal.collectPlaintext(arena);
     defer recs.deinit();
     const target_header = core.journal.Journal.resolveEditTarget(recs.headers, target) catch |err| {
         try output.reportTargetError(arena, io, style, err_file, target, err);

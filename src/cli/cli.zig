@@ -3,7 +3,7 @@
 //!     zephyr today | yesterday | week | on YYYY-MM-DD  |  zephyr search <q>
 //!     zephyr ask [from:to] <question...>  |  zephyr recap [start..end]
 //!     zephyr profile  |  zephyr derived status|rebuild
-//!     zephyr model fetch [--force] | zephyr model status
+//!     zephyr model fetch [--force] | zephyr model status  |  zephyr key status
 //!     zephyr edit <seq> [-t TAG]... "text"  |  zephyr rm <seq>
 //!     zephyr redact <seq> [--yes]  |  zephyr checkpoint [--key PATH]
 //!     zephyr export --for-ai [YYYY-MM-DD[:YYYY-MM-DD]]
@@ -28,6 +28,7 @@ const derived_cmd = @import("commands/derived.zig");
 const edit_cmd = @import("commands/edit.zig");
 const export_cmd = @import("commands/export.zig");
 const log_cmd = @import("commands/log.zig");
+const key_cmd = @import("commands/key.zig");
 const mcp_cmd = @import("commands/mcp.zig");
 const model_cmd = @import("commands/model.zig");
 const ots_export_cmd = @import("commands/ots-export.zig");
@@ -123,6 +124,8 @@ pub fn run(init: std.process.Init, argv: []const []const u8) RunError!void {
         return derived_cmd.run(arena, gpa, io, style, err_file, out, init.environ_map, path, rest);
     } else if (std.mem.eql(u8, command, "model")) {
         return model_cmd.run(arena, gpa, io, style, err_file, out, init.environ_map, rest);
+    } else if (std.mem.eql(u8, command, "key")) {
+        return key_cmd.run(arena, io, style, err_file, out, init.environ_map, path, rest);
     } else if (std.mem.eql(u8, command, "rank")) {
         return rank_cmd.run(arena, gpa, io, style, err_file, out, init.environ_map, path, rest, no_pager);
     } else if (std.mem.eql(u8, command, "edit")) {
@@ -152,6 +155,7 @@ fn isCommand(s: []const u8) bool {
         std.mem.eql(u8, s, "search") or std.mem.eql(u8, s, "ask") or
         std.mem.eql(u8, s, "recap") or std.mem.eql(u8, s, "profile") or
         std.mem.eql(u8, s, "derived") or std.mem.eql(u8, s, "model") or
+        std.mem.eql(u8, s, "key") or
         std.mem.eql(u8, s, "edit") or
         std.mem.eql(u8, s, "rm") or std.mem.eql(u8, s, "redact") or
         std.mem.eql(u8, s, "checkpoint") or std.mem.eql(u8, s, "export") or

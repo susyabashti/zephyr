@@ -22,10 +22,10 @@ pub fn run(
     path: []const u8,
     no_pager: bool,
 ) errors.RunError!void {
-    const journal = try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path);
+    const journal = try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path, false);
     defer journal.close();
     const result = try cli_journal.verifyOrReport(arena, io, style, err_file, &journal);
-    const recs = try journal.collectRecords(arena);
+    const recs = try journal.collectPlaintext(arena);
     defer recs.deinit();
     const visible = try core.view.visibleEntries(arena, recs.headers, recs.payloads);
     defer visible.deinit();

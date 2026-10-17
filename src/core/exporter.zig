@@ -11,7 +11,7 @@ const view = @import("view.zig");
 
 const Allocator = std.mem.Allocator;
 
-pub const RenderError = Allocator.Error || journal.Journal.VerifyError || journal.Journal.CollectRecordsError ||
+pub const RenderError = Allocator.Error || journal.Journal.VerifyError || journal.Journal.CollectPlaintextError ||
     view.RenderError ||
     error{
         VerifyFailed,
@@ -25,7 +25,7 @@ pub const RenderError = Allocator.Error || journal.Journal.VerifyError || journa
 pub fn render(allocator: Allocator, j: *const journal.Journal, range: ?view.DayRange) RenderError![]u8 {
     const result = try j.verify(allocator);
     if (!result.ok) return error.VerifyFailed;
-    const recs = try j.collectRecords(allocator);
+    const recs = try j.collectPlaintext(allocator);
     defer recs.deinit();
     return view.renderRange(allocator, recs.headers, recs.payloads, range);
 }

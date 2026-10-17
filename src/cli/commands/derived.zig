@@ -26,7 +26,7 @@ pub fn run(
     rest: []const []const u8,
 ) errors.RunError!void {
     if (rest.len == 0 or rest.len > 2) return error.Usage;
-    const journal = try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path);
+    const journal = try cli_journal.openReadJournal(arena, io, style, err_file, environ_map, path, false);
     defer journal.close();
     const result = try cli_journal.verifyOrReport(arena, io, style, err_file, &journal);
     if (rest.len == 1 and std.mem.eql(u8, rest[0], "status")) {
@@ -41,7 +41,7 @@ pub fn run(
         // (spec/semantic.md section 7).
         const with_embeddings = rest.len == 2 and std.mem.eql(u8, rest[1], "--embeddings");
         if (rest.len == 2 and !with_embeddings) return error.Usage;
-        const recs = try journal.collectRecords(arena);
+        const recs = try journal.collectPlaintext(arena);
         defer recs.deinit();
         const visible = try core.view.visibleEntries(arena, recs.headers, recs.payloads);
         defer visible.deinit();

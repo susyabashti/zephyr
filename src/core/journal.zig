@@ -14,6 +14,7 @@ const segment = @import("segment.zig");
 const anchor = @import("anchor.zig");
 const ots = @import("ots.zig");
 const timezone = @import("timezone.zig");
+const vault = @import("vault.zig");
 
 const Io = std.Io;
 const Dir = Io.Dir;
@@ -30,9 +31,18 @@ pub const Journal = struct {
     dir: Dir,
     path: []const u8,
     tz: *const timezone.Tz,
+    /// The master key when the journal is encrypted (meta file present,
+    /// spec/encryption.md). The CLI resolves the key the meta pins and sets
+    /// this before the first use; `null` only in the vector harness, which
+    /// builds v1 journals in-process (v1 is discontinued on disk — spec
+    /// section 4).
+    key: ?[vault.KeyLen]u8 = null,
 
     /// Opens (or, when `create_if_missing`, creates) the journal directory.
     /// `allocator` must outlive the journal and everything derived from it.
+    /// The key is not touched here: the journal opens with `key == null`
+    /// and the CLI's open flow (spec/encryption.md section 3.4) resolves
+    /// the key and sets it before the first use.
     pub fn open(
         allocator: Allocator,
         io: Io,
@@ -49,6 +59,34 @@ pub const Journal = struct {
         const tz_file = try timezone.resolveTzFile(allocator, environ_map);
         const tz = try timezone.load(allocator, io, tz_file);
         return Journal{ .io = io, .allocator = allocator, .dir = dir, .path = path, .tz = tz };
+    }
+
+    /// The journal's meta file (spec/encryption.md section 3.1), or null
+    /// when it is absent. A malformed meta file also reads as null (spec
+    /// section 3.1): the open flow then sees a journal without a meta — a
+    /// discontinued v1 journal (spec section 4). The returned `key_id` is
+    /// owned by `allocator`.
+    pub fn loadMeta(self: *const Journal, allocator: Allocator) (Dir.ReadFileAllocError || vault.MetaError)!?vault.Meta {
+        const bytes = self.readFileBytes(allocator, vault.MetaFileName) catch |err| switch (err) {
+            error.FileNotFound => return null,
+            else => return err,
+        };
+        defer allocator.free(bytes);
+        const meta = vault.decodeMeta(allocator, bytes) catch |err| switch (err) {
+            // A malformed meta file is treated as absent (spec section 3.1).
+            error.OutOfMemory => return err,
+            else => return null,
+        };
+        return meta;
+    }
+
+    /// Writes the meta file atomically. Journals are born encrypted: a
+    /// fresh journal writes the meta before its first record, so the store
+    /// the meta pins holds the key before any payload is sealed under it.
+    pub fn writeMeta(self: *const Journal, allocator: Allocator, meta: *const vault.Meta) (vault.MetaError || segment.WriteError)!void {
+        const bytes = try vault.encodeMeta(allocator, meta.store, meta.key_id);
+        defer allocator.free(bytes);
+        return segment.writeAtomic(self.dir, self.io, vault.MetaFileName, bytes);
     }
 
     pub fn close(self: *const Journal) void {
@@ -133,10 +171,10 @@ pub const Journal = struct {
         const next_seq = files_before_count + if (extend) |e| e.record_count else 0;
         const prev_hash = if (extend) |e| e.head else files_before_head;
 
-        // Build the record.
-        var salt: [records.SaltLen]u8 = undefined;
-        try Io.randomSecure(self.io, &salt);
-        const payload = records.Payload{ .salt = salt, .text = text, .tags = tags };
+        // Build the record. v1 stores a salted payload; v2 seals the body
+        // (the payload minus the salt) with a fresh nonce, binding the
+        // ciphertext to the record identity via the AAD
+        // (spec/encryption.md section 2).
         var header = records.Header{
             .version = records.FormatVersion,
             .record_type = record_type,
@@ -148,10 +186,27 @@ pub const Journal = struct {
             .commitment = undefined,
             .record_hash = undefined,
         };
+        const payload = records.Payload{ .salt = @splat(0), .text = text, .tags = tags };
         try records.validate(&header, &payload);
-        const payload_bytes = try allocator.alloc(u8, records.payloadSize(text, tags));
+        const payload_bytes = if (self.key) |k| blk: {
+            const body = try allocator.alloc(u8, records.bodySize(text, tags));
+            errdefer allocator.free(body);
+            records.encodeBody(body, text, tags);
+            var nonce: [vault.NonceLen]u8 = undefined;
+            try Io.randomSecure(self.io, &nonce);
+            // The AAD is the header prefix [0..29): it does not include the
+            // commitment, so it is stable before the payload exists.
+            const aad = vault.aadOf(&header);
+            break :blk try vault.seal(allocator, &k, nonce, &aad, body);
+        } else blk: {
+            var salt: [records.SaltLen]u8 = undefined;
+            try Io.randomSecure(self.io, &salt);
+            const salted = records.Payload{ .salt = salt, .text = text, .tags = tags };
+            const pb = try allocator.alloc(u8, records.payloadSize(text, tags));
+            records.encodePayload(&salted, pb);
+            break :blk pb;
+        };
         defer allocator.free(payload_bytes);
-        records.encodePayload(&payload, payload_bytes);
         header.commitment = records.computeCommitment(payload_bytes);
         var prefix: [records.HeaderPrefixLen]u8 = undefined;
         header.prefixBytes(&prefix);
@@ -201,16 +256,22 @@ pub const Journal = struct {
     }
 
     /// All records of the journal in order. The payloads borrow from the raw
-    /// segment bytes in `files`, so call `deinit` to release everything.
+    /// segment bytes in `files` (unless `owns_payloads`), so call `deinit`
+    /// to release everything.
     pub const RecordSet = struct {
         headers: []const records.Header,
         payloads: []const []const u8,
         /// Raw segment file bytes, in chronological order.
         files: [][]const u8,
         allocator: Allocator,
+        /// True when the payloads are owned copies (the decrypted v2
+        /// bodies re-wrapped as v1-shaped payloads) rather than borrowed
+        /// from `files`.
+        owns_payloads: bool,
 
         pub fn deinit(self: RecordSet) void {
             const allocator = self.allocator;
+            if (self.owns_payloads) for (self.payloads) |p| allocator.free(p);
             for (self.files) |bytes| allocator.free(bytes);
             allocator.free(self.files);
             allocator.free(self.payloads);
@@ -255,13 +316,49 @@ pub const Journal = struct {
             .payloads = owned_payloads,
             .files = owned_files,
             .allocator = allocator,
+            .owns_payloads = false,
+        };
+    }
+
+    /// All records with plaintext payloads. A journal without a key (the v1
+    /// vector harness) borrows exactly as `collectRecords`; an encrypted
+    /// journal decrypts every envelope and
+    /// re-wraps the body as a v1-shaped payload (zero salt), so consumers
+    /// keep using `records.decodePayload` unchanged. The redacted records
+    /// of a v2 journal carry the v1 placeholder bytes.
+    pub const CollectPlaintextError = CollectRecordsError || vault.OpenError;
+
+    pub fn collectPlaintext(self: *const Journal, allocator: Allocator) CollectPlaintextError!RecordSet {
+        const base = try self.collectRecords(allocator);
+        if (self.key == null) return base;
+        const key = self.key.?;
+        var plain = std.ArrayList([]const u8).empty;
+        errdefer {
+            plain.deinit(allocator);
+            base.deinit();
+        }
+        for (base.headers, base.payloads) |h, payload| {
+            const owned = try plaintextOf(allocator, &key, &h, payload);
+            try plain.append(allocator, owned);
+        }
+        const owned_payloads = try plain.toOwnedSlice(allocator);
+        // The borrowed payload slice-header array is replaced; the files it
+        // pointed into stay.
+        allocator.free(base.payloads);
+        return RecordSet{
+            .headers = base.headers,
+            .payloads = owned_payloads,
+            .files = base.files,
+            .allocator = allocator,
+            .owns_payloads = true,
         };
     }
 
     /// Redacts an entry: replaces the stored payload of the target entry and
-    /// of every amendment on it with the 35-byte placeholder (payload region
-    /// only; the headers and hash chain are untouched, spec sections 4 and
-    /// 6), then appends the redaction record. Returns the redaction record's
+    /// of every amendment on it with the journal's redaction placeholder
+    /// (35 bytes for v1, the 41-byte envelope for v2 — payload region only;
+    /// the headers and hash chain are untouched, spec sections 4 and 6),
+    /// then appends the redaction record. Returns the redaction record's
     /// seq. The journal is assumed to have passed verify.
     pub const RedactError = Allocator.Error || Dir.ReadFileAllocError || Dir.Iterator.Error ||
         segment.ParseError || segment.RedactPayloadsError || AppendError || error{
@@ -304,7 +401,8 @@ pub const Journal = struct {
             }
             if (indexes.items.len == 0) continue;
             found = true;
-            const new_bytes = try segment.redactPayloads(allocator, bytes, indexes.items);
+            const placeholder: []const u8 = if (self.key != null) &vault.placeholderV2 else &records.Payload.redactedPlaceholder;
+            const new_bytes = try segment.redactPayloads(allocator, bytes, indexes.items, placeholder);
             defer allocator.free(new_bytes);
             try segment.writeAtomic(self.dir, self.io, name, new_bytes);
         }
@@ -325,10 +423,12 @@ pub const Journal = struct {
         return &headers[seq];
     }
 
-    /// Full integrity check (spec section 8). Never frees caller-visible
+    /// Full integrity check (spec section 8). For an encrypted journal the
+    /// payload pass additionally requires every payload to authenticate and
+    /// decode (spec/encryption.md section 6). Never frees caller-visible
     /// strings: pass an arena allocator and keep it alive past the result.
     pub const VerifyError = Allocator.Error || Dir.ReadFileAllocError || Dir.Iterator.Error ||
-        segment.ParseError || records.DecodePayloadError;
+        segment.ParseError || records.DecodePayloadError || vault.OpenError;
 
     pub fn verify(self: *const Journal, allocator: Allocator) VerifyError!VerifyResult {
         const names = try self.listSegments(allocator);
@@ -347,7 +447,8 @@ pub const Journal = struct {
             const bytes = try self.readFileBytes(allocator, name);
             try files.append(allocator, .{ .name = name, .bytes = bytes });
         }
-        return verifyBytes(allocator, files.items);
+        const key = if (self.key) |k| &k else null;
+        return verifyBytes(allocator, files.items, key);
     }
 
     /// The journal's latest anchor (anchor-format section 6).
@@ -371,7 +472,7 @@ pub const Journal = struct {
     };
 
     pub const CheckAnchorsError = Allocator.Error || Dir.OpenError || Dir.ReadFileAllocError ||
-        Dir.Iterator.Error || CollectRecordsError;
+        Dir.Iterator.Error || CollectPlaintextError;
 
     /// Runs the anchor check (anchor-format section 6): load the latest
     /// artifact from `<journal>/anchors/`, verify it, and check chain
@@ -419,7 +520,7 @@ pub const Journal = struct {
             return .{ .ok = null, .file_name = name, .failure = err };
         };
 
-        const recs = try self.collectRecords(allocator);
+        const recs = try self.collectPlaintext(allocator);
         defer recs.deinit();
         anchor.checkChain(&artifact, recs.headers) catch |err| {
             return .{ .ok = null, .file_name = name, .failure = err };
@@ -550,6 +651,35 @@ pub const Journal = struct {
     }
 };
 
+/// The plaintext form of one stored payload, owned by `allocator`.
+fn plaintextOf(
+    allocator: Allocator,
+    key: *const [vault.KeyLen]u8,
+    header: *const records.Header,
+    payload: []const u8,
+) (Allocator.Error || vault.OpenError)![]u8 {
+    if (vault.isPlaceholderV2(payload)) {
+        const ph = try allocator.alloc(u8, records.PlaceholderLen);
+        @memset(ph, 0);
+        return ph;
+    }
+    const aad = vault.aadOf(header);
+    const body = try vault.open(allocator, key, &aad, payload);
+    // No `try` here: 0.17 rejects `try <expr> catch |err|` whenever another
+    // statement follows the declaration (the `try` makes `catch` see the
+    // already-unwrapped slice). The catch arm propagates the error itself.
+    const out = allocator.alloc(u8, records.SaltLen + body.len) catch |err| {
+        allocator.free(body);
+        return err;
+    };
+    // Copy before the free: 0.17's free poisons the released region, so
+    // reading `body` after it would copy poison bytes, not plaintext.
+    @memset(out[0..records.SaltLen], 0);
+    @memcpy(out[records.SaltLen..], body);
+    allocator.free(body);
+    return out;
+}
+
 pub const verifyFile = struct {
     name: []const u8,
     bytes: []const u8,
@@ -568,13 +698,20 @@ pub const VerifyResult = struct {
     redacted_count: u64,
     head: [records.DigestLen]u8,
     issue: ?VerifyIssue,
+    /// True when some payload's content could not be checked (a v2 journal
+    /// verified without the key, spec/encryption.md section 6): the chain
+    /// and commitments are still fully verified.
+    payloads_unverified: bool,
 };
 
 /// The pure two-pass verify over in-memory files (spec section 8). Files must
-/// be in chronological (name) order. Never frees its inputs.
-pub const VerifyBytesError = Allocator.Error || segment.ParseError || records.DecodePayloadError;
+/// be in chronological (name) order. Never frees its inputs. When `key` is
+/// set, the payload pass requires every non-redacted payload to authenticate
+/// and decode (spec/encryption.md section 6); without it, v2-shaped payloads
+/// are reported unverified instead of decoded.
+pub const VerifyBytesError = Allocator.Error || segment.ParseError || records.DecodePayloadError || vault.OpenError;
 
-pub fn verifyBytes(allocator: Allocator, files: []const verifyFile) VerifyBytesError!VerifyResult {
+pub fn verifyBytes(allocator: Allocator, files: []const verifyFile, key: ?*const [vault.KeyLen]u8) VerifyBytesError!VerifyResult {
     if (files.len == 0) {
         return VerifyResult{
             .ok = true,
@@ -582,6 +719,7 @@ pub fn verifyBytes(allocator: Allocator, files: []const verifyFile) VerifyBytesE
             .redacted_count = 0,
             .head = records.Header.GenesisHash,
             .issue = null,
+            .payloads_unverified = false,
         };
     }
 
@@ -598,6 +736,7 @@ pub fn verifyBytes(allocator: Allocator, files: []const verifyFile) VerifyBytesE
                 .redacted_count = 0,
                 .head = records.Header.GenesisHash,
                 .issue = parseIssue(allocator, f.name, err, seq),
+                .payloads_unverified = false,
             };
         };
         parsed_before += seg.recordCount();
@@ -653,26 +792,55 @@ pub fn verifyBytes(allocator: Allocator, files: []const verifyFile) VerifyBytesE
         redacted[t] = true;
     }
 
-    // Pass 2b: payloads — commitment or redacted placeholder (step 6).
+    // Pass 2b: payloads — commitment or redacted placeholder (step 6);
+    // with the key, every non-redacted payload must also authenticate and
+    // decode (spec/encryption.md section 6).
     var redacted_count: u64 = 0;
+    var payloads_unverified: bool = false;
     var gi: u64 = 0;
     for (segments.items) |seg| {
         for (seg.records, seg.payloads, 0..) |h, payload, i| {
-            const decoded = records.decodePayload(allocator, payload) catch |err| {
-                return fail(allocator, seg.file_name, h.seq, "payload", payloadDecodeDetail(err));
-            };
-            allocator.free(decoded.tags); // verify only needs the structure check
             // A redaction applies to the target entry and every amendment on
             // it (spec section 3.1), so both carry the placeholder payload.
             const target_redacted = h.target_seq < total and redacted[h.target_seq];
             const is_redacted_record = (h.record_type == .entry and redacted[h.seq]) or
                 (h.record_type == .amendment and target_redacted);
             if (is_redacted_record) {
-                if (!records.isRedactedPlaceholder(payload)) {
+                const is_placeholder = if (key) |k| blk: {
+                    _ = k;
+                    break :blk vault.isPlaceholderV2(payload);
+                } else records.isRedactedPlaceholder(payload);
+                if (!is_placeholder) {
                     return fail(allocator, seg.file_name, h.seq, "payload", "redacted record does not carry the placeholder payload");
                 }
                 if (h.record_type == .entry) redacted_count += 1;
+            } else if (key) |k| {
+                const commitment = records.computeCommitment(payload);
+                if (!std.mem.eql(u8, &commitment, &h.commitment)) {
+                    return fail(allocator, seg.file_name, h.seq, "commitment", "payload does not match commitment");
+                }
+                if (!vault.isPlaceholderV2(payload)) {
+                    const aad = vault.aadOf(&h);
+                    const body = vault.open(allocator, k, &aad, payload) catch |err| {
+                        return fail(allocator, seg.file_name, h.seq, "payload", aeadOpenDetail(err));
+                    };
+                    defer allocator.free(body);
+                    const decoded = records.decodeBody(allocator, body) catch |err| {
+                        return fail(allocator, seg.file_name, h.seq, "payload", payloadDecodeDetail(err));
+                    };
+                    allocator.free(decoded.tags); // verify only needs the structure check
+                }
             } else {
+                if (isV2Shaped(payload)) {
+                    // Without the key the content cannot be checked; the
+                    // commitment below still binds the stored bytes.
+                    payloads_unverified = true;
+                } else {
+                    const decoded = records.decodePayload(allocator, payload) catch |err| {
+                        return fail(allocator, seg.file_name, h.seq, "payload", payloadDecodeDetail(err));
+                    };
+                    allocator.free(decoded.tags); // verify only needs the structure check
+                }
                 const commitment = records.computeCommitment(payload);
                 if (!std.mem.eql(u8, &commitment, &h.commitment)) {
                     return fail(allocator, seg.file_name, h.seq, "commitment", "payload does not match commitment");
@@ -727,6 +895,22 @@ pub fn verifyBytes(allocator: Allocator, files: []const verifyFile) VerifyBytesE
         .redacted_count = redacted_count,
         .head = last_seg.head(),
         .issue = null,
+        .payloads_unverified = payloads_unverified,
+    };
+}
+
+/// A payload that a keyless verify must not attempt to decode as v1: it is
+/// shaped like a v2 envelope (spec/encryption.md section 2).
+fn isV2Shaped(payload: []const u8) bool {
+    return payload.len >= vault.EnvelopeOverhead and payload[0] == vault.FormatV2;
+}
+
+fn aeadOpenDetail(err: vault.OpenError) []const u8 {
+    return switch (err) {
+        error.OutOfMemory => "out of memory",
+        error.Truncated => "payload is a truncated envelope",
+        error.BadFormat => "payload is not a v2 envelope",
+        error.AuthenticationFailed => "payload does not authenticate (key, envelope, tag, or AAD mismatch)",
     };
 }
 
@@ -739,6 +923,7 @@ fn fail(allocator: Allocator, file: []const u8, seq: u64, field: []const u8, det
         .redacted_count = 0,
         .head = records.Header.GenesisHash,
         .issue = .{ .file = dup_file, .seq = seq, .field = field, .detail = dup_detail },
+        .payloads_unverified = false,
     };
 }
 
@@ -914,7 +1099,7 @@ test "extendSegmentBytes inserts the block in the header region" {
     try std.testing.expectEqualSlices(u8, &rec1.record_hash, &seg.records[1].record_hash);
 
     // The whole file must pass the two-pass verify.
-    const result = try verifyBytes(allocator, &.{.{ .name = "2026-01.zph", .bytes = file1 }});
+    const result = try verifyBytes(allocator, &.{.{ .name = "2026-01.zph", .bytes = file1 }}, null);
     try std.testing.expect(result.ok);
     try std.testing.expectEqual(@as(u64, 2), result.record_count);
 }

@@ -271,7 +271,7 @@ fn checkJournal(allocator: Allocator, j: *const Journal) CheckError!void {
     }
 
     // The clean journal must verify, with the head the chain produced.
-    const result = try journal.verifyBytes(allocator, files.items);
+    const result = try journal.verifyBytes(allocator, files.items, null);
     if (!result.ok) {
         const iss = result.issue.?;
         std.debug.print("{s}: clean journal failed verify: {s} seq {d} {s} ({s})\n", .{
@@ -309,7 +309,7 @@ fn checkJournal(allocator: Allocator, j: *const Journal) CheckError!void {
                 .bytes = if (std.mem.eql(u8, f.name, c.segment)) data else f.bytes,
             });
         }
-        const r = try journal.verifyBytes(allocator, modified.items);
+        const r = try journal.verifyBytes(allocator, modified.items, null);
         if (c.expect.ok) {
             if (!r.ok) {
                 std.debug.print("{s}: corruption {d} ({s}) unexpectedly failed verify\n", .{ j.id, i, c.description });

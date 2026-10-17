@@ -280,7 +280,7 @@ const Verified = struct {
 fn verified(arena: Allocator, journal: *const journal_mod.Journal) CallError!Verified {
     const result = try journal.verify(arena);
     if (!result.ok) return .{ .result = result, .recs = null };
-    const recs = try journal.collectRecords(arena);
+    const recs = try journal.collectPlaintext(arena);
     return .{ .result = result, .recs = recs };
 }
 

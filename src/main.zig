@@ -11,6 +11,9 @@ pub fn main(init: std.process.Init) !void {
         // cli.run already printed the details.
         error.Usage, error.TargetNotFound, error.TargetNotEntry, error.SegmentNotSealed => std.process.exit(2),
         error.VerifyFailed, error.JournalNotFound, error.BadOtsProof => std.process.exit(1),
+        // Encryption (spec/encryption.md): the journal cannot be opened at
+        // all — the key is missing, locked behind the keychain, or corrupt.
+        error.KeyNotFound, error.KeychainUnavailable, error.KeyCorrupt => std.process.exit(1),
         // Phase 8: the embedding surface. Config/model-placement problems
         // are the user's to act on (exit 2, like usage); engine failures
         // are runtime faults (exit 1).
