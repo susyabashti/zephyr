@@ -12,6 +12,11 @@
 const std = @import("std");
 const core = @import("zephyr_core");
 
+/// The C runtime's environment array. Referencing any extern symbol makes
+/// 0.17 require an explicit libc dependency for Linux targets, which the
+/// module declares in build.zig (.link_libc = true).
+extern "c" var environ: [*:null]?[*:0]u8;
+
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -31,10 +36,10 @@ test "phase 4: private content never reaches the LLM view" {
 
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
     const path = try allocator.print("{s}/.tmp-phase4", .{cwd_path});
-    const environ = std.process.Environ.Map.init(allocator);
+    const empty_environ = std.process.Environ.Map.init(allocator);
 
     Dir.deleteTree(cwd, io, path) catch |e| if (e != error.FileNotFound) return e;
-    const journal = try core.journal.Journal.open(allocator, io, &environ, path, true);
+    const journal = try core.journal.Journal.open(allocator, io, &empty_environ, path, true);
     defer {
         journal.close();
         Dir.deleteTree(cwd, io, path) catch |e| if (e != error.FileNotFound) std.debug.panic("could not clean up: {s}", .{@errorName(e)});
@@ -77,10 +82,10 @@ test "phase 4: exporter refuses a failing log" {
 
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
     const path = try allocator.print("{s}/.tmp-phase4b", .{cwd_path});
-    const environ = std.process.Environ.Map.init(allocator);
+    const empty_environ = std.process.Environ.Map.init(allocator);
 
     Dir.deleteTree(cwd, io, path) catch |e| if (e != error.FileNotFound) return e;
-    const journal = try core.journal.Journal.open(allocator, io, &environ, path, true);
+    const journal = try core.journal.Journal.open(allocator, io, &empty_environ, path, true);
     defer {
         journal.close();
         Dir.deleteTree(cwd, io, path) catch |e| if (e != error.FileNotFound) std.debug.panic("could not clean up: {s}", .{@errorName(e)});
@@ -190,16 +195,14 @@ test "phase 4: tokens per entry beat raw JSON" {
     try std.testing.expect(view_tokens <= TargetViewTokensTotal);
 }
 
-/// Is ZEPHYR_TEST_VERBOSE set in the process environment? Note that
-/// `Environ.Map.init` returns an *empty* map in 0.17, so the real
-/// environment is read by building an `Environ` over the C environ, the
-/// same way std.start's main entry point does.
+/// Is ZEPHYR_TEST_VERBOSE set? Read at run time, because the value has to
+/// track the caller's environment on every invocation: a build-time value
+/// (e.g. via an options module) gets frozen in the 0.17 configure cache.
 fn verboseReportEnabled() bool {
-    const c_environ = std.c.environ;
     var count: usize = 0;
-    while (c_environ[count] != null) : (count += 1) {}
-    const environ = std.process.Environ{ .block = .{ .slice = c_environ[0..count :null] } };
-    return std.process.Environ.containsConstant(environ, "ZEPHYR_TEST_VERBOSE");
+    while (environ[count] != null) : (count += 1) {}
+    const environ_block = std.process.Environ{ .block = .{ .slice = environ[0..count :null] } };
+    return std.process.Environ.containsConstant(environ_block, "ZEPHYR_TEST_VERBOSE");
 }
 
 /// Regression ceiling for the 10k-entry measurement above
