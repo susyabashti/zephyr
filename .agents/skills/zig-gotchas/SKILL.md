@@ -10,10 +10,12 @@ description: >
   builtin.os.tag, terminal-size probing (TIOCGWINSZ), errdefer block form,
   and zig build test quirks (silent success, stale .zig-cache binaries,
   spurious "failed command"), nested-slice equality, tagged-union syntax,
-  child-process fd ownership, and TTY/pty testing. Use when writing or
-  debugging Zig, when tests mysteriously do not run, on segfaults or "error
-  set" compile errors, or when string, fmt, or JSON misbehaves. Companion to
-  zig-api (version-specific APIs) and zig-tiger-style (style).
+  child-process fd ownership, TTY/pty testing, and 0.17 env-var reading
+  (empty Environ.Map, extern-C libc requirement, configure-cached options).
+  Use when writing or debugging Zig, when tests mysteriously do not run,
+  on segfaults or "error set" compile errors, when string, fmt, or JSON
+  misbehaves, or when environment variables mysteriously never arrive.
+  Companion to zig-api (version-specific APIs) and zig-tiger-style (style).
 metadata:
   language: "zig"
   category: "programming-language"
@@ -812,3 +814,49 @@ real `less`, feed a delayed `q`: `(sleep 2; printf q) | script -q cap.txt
   for type 'bool'`); use `{any}`.
 - The process id is `std.posix.system.getpid()` — there is no
   `std.posix.getpid` and no `std.process.getPid` in 0.17.
+
+## 33. Reading environment variables in 0.17: empty Map, extern-C libc, frozen options
+
+Every one of these was verified by a build that silently did the wrong thing:
+
+- **`std.process.Environ.Map.init(allocator)` returns an *empty* map.** It
+  never loads the process environment, so `map.get("KEY")` is always null —
+  with no error, no warning. To read a variable:
+  - in `main`, take `init: std.process.Init` and use `init.environ_map`
+    (built for you by `std.start`); core code should receive
+    `*const std.process.Environ.Map` as a parameter, not read globals;
+  - otherwise, wrap the C environ yourself: count entries of
+    `std.c.environ`, build
+    `std.process.Environ{ .block = .{ .slice = c_environ[0..count :null] } }`,
+    then `std.process.Environ.containsConstant(environ, "KEY")`
+    (allocation-free, cross-platform).
+- **Test declarations cannot take `std.process.Init`** in 0.17 (langref:
+  tests are parameterless `anyerror!void` blocks). A test that needs the
+  environment must read it itself (see the extern trick below) or take an
+  env map as a parameter.
+- **Any extern-C reference forces an explicit libc dependency on Linux
+  targets.** Not just `@import("std.c")` — even a bare
+  `extern "c" var environ: [*:null]?[*:0]u8;` in a test module produces
+  `error: dependency on libc must be explicitly specified in the build
+  command` on Linux (macOS compiles fine, so it only surfaces in CI). Fix:
+  `.link_libc = true` on the module in `build.zig` (no-op on macOS).
+- **The extern identifier IS the symbol name.**
+  `extern "c" var c_environ` asks the linker for `_c_environ` →
+  `undefined symbol` on macOS. It must be named `environ` (resolves to
+  `_environ` in libSystem, `environ` in glibc/musl).
+- **Function-local extern declarations don't parse in 0.17** — neither
+  `extern "c" var` nor `extern .C var` inside a function body ("expected a
+  struct, enum or union"). Top-level only. (Top-level accepts the string
+  form `extern "c"`, as std/c.zig itself uses.)
+- **Don't hand caller env to the build via an options module.**
+  `b.graph.environ_map` in `build.zig` does see the caller's environment
+  (verified), but an option computed from it is frozen in the 0.17
+  *configure* cache: one flag-ON run bakes `true` into the cached graph,
+  and later flag-OFF runs reuse it — the flag appears to ignore you in the
+  wrong direction. Read env at run time inside the binary, not at build
+  time.
+- **A local `const environ` shadowing a top-level `extern "c" var environ`
+  is a hard error** in 0.17 ("local constant shadows declaration"), not a
+  warning. Rename the locals.
+- **There is no `std.posix.getenv` in 0.17** — `getenv` lives only in
+  `std.c` (which trips the libc rule above).
