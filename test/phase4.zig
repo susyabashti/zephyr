@@ -12,6 +12,11 @@
 const std = @import("std");
 const core = @import("zephyr_core");
 
+/// The C runtime's environment array. Referencing any extern symbol makes
+/// 0.17 require an explicit libc dependency for Linux targets, which the
+/// module declares in build.zig (.link_libc = true).
+extern "c" var environ: [*:null]?[*:0]u8;
+
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -31,10 +36,10 @@ test "phase 4: private content never reaches the LLM view" {
 
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
     const path = try allocator.print("{s}/.tmp-phase4", .{cwd_path});
-    const environ = std.process.Environ.Map.init(allocator);
+    const empty_environ = std.process.Environ.Map.init(allocator);
 
     Dir.deleteTree(cwd, io, path) catch |e| if (e != error.FileNotFound) return e;
-    const journal = try core.journal.Journal.open(allocator, io, &environ, path, true);
+    const journal = try core.journal.Journal.open(allocator, io, &empty_environ, path, true);
     defer {
         journal.close();
         Dir.deleteTree(cwd, io, path) catch |e| if (e != error.FileNotFound) std.debug.panic("could not clean up: {s}", .{@errorName(e)});
@@ -77,10 +82,10 @@ test "phase 4: exporter refuses a failing log" {
 
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
     const path = try allocator.print("{s}/.tmp-phase4b", .{cwd_path});
-    const environ = std.process.Environ.Map.init(allocator);
+    const empty_environ = std.process.Environ.Map.init(allocator);
 
     Dir.deleteTree(cwd, io, path) catch |e| if (e != error.FileNotFound) return e;
-    const journal = try core.journal.Journal.open(allocator, io, &environ, path, true);
+    const journal = try core.journal.Journal.open(allocator, io, &empty_environ, path, true);
     defer {
         journal.close();
         Dir.deleteTree(cwd, io, path) catch |e| if (e != error.FileNotFound) std.debug.panic("could not clean up: {s}", .{@errorName(e)});
@@ -168,20 +173,36 @@ test "phase 4: tokens per entry beat raw JSON" {
     // to both formats so the comparison is like-for-like.
     const view_tokens: u64 = (rendered.len + 3) / 4;
     const jsonl_tokens: u64 = (jsonl.items.len + 3) / 4;
-
-    std.debug.print("\nphase 4 llm-view gate\n", .{});
-    std.debug.print("  entries:               {d}\n", .{n});
-    std.debug.print("  llm view bytes:        {d}\n", .{rendered.len});
-    std.debug.print("  llm view tokens/entry: {d:.2}\n", .{@as(f64, @floatFromInt(view_tokens)) / @as(f64, @floatFromInt(n))});
-    std.debug.print("  JSONL bytes:           {d}\n", .{jsonl.items.len});
-    std.debug.print("  JSONL tokens/entry:    {d:.2}\n", .{@as(f64, @floatFromInt(jsonl_tokens)) / @as(f64, @floatFromInt(n))});
     const ratio: f64 = @as(f64, @floatFromInt(view_tokens)) / @as(f64, @floatFromInt(jsonl_tokens));
-    std.debug.print("  ratio (llm/JSONL):     {d:.2}\n", .{ratio});
+
+    // The report is off by default: under `zig build test` the runner talks
+    // to the build system on stdout, and any stderr a test emits is shown by
+    // zig build (0.17) in a step-failure report, making a passing gate look
+    // like a crash in CI logs. Enable with ZEPHYR_TEST_VERBOSE=1.
+    if (verboseReportEnabled()) {
+        std.debug.print("\nphase 4 llm-view gate\n", .{});
+        std.debug.print("  entries:               {d}\n", .{n});
+        std.debug.print("  llm view bytes:        {d}\n", .{rendered.len});
+        std.debug.print("  llm view tokens/entry: {d:.2}\n", .{@as(f64, @floatFromInt(view_tokens)) / @as(f64, @floatFromInt(n))});
+        std.debug.print("  JSONL bytes:           {d}\n", .{jsonl.items.len});
+        std.debug.print("  JSONL tokens/entry:    {d:.2}\n", .{@as(f64, @floatFromInt(jsonl_tokens)) / @as(f64, @floatFromInt(n))});
+        std.debug.print("  ratio (llm/JSONL):     {d:.2}\n", .{ratio});
+    }
 
     // The gate: the LLM view beats raw JSON, and stays under the target
     // ceiling (docs/features.md).
     try std.testing.expect(view_tokens < jsonl_tokens);
     try std.testing.expect(view_tokens <= TargetViewTokensTotal);
+}
+
+/// Is ZEPHYR_TEST_VERBOSE set? Read at run time, because the value has to
+/// track the caller's environment on every invocation: a build-time value
+/// (e.g. via an options module) gets frozen in the 0.17 configure cache.
+fn verboseReportEnabled() bool {
+    var count: usize = 0;
+    while (environ[count] != null) : (count += 1) {}
+    const environ_block = std.process.Environ{ .block = .{ .slice = environ[0..count :null] } };
+    return std.process.Environ.containsConstant(environ_block, "ZEPHYR_TEST_VERBOSE");
 }
 
 /// Regression ceiling for the 10k-entry measurement above

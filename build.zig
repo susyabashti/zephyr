@@ -150,8 +150,14 @@ pub fn build(b: *std.Build) void {
             &[_][]const u8{ "llama", "ggml", "ggml-base", "ggml-cpu" };
         embed.addLibraryPath(b.path("zig-out/llama/src"));
         embed.addLibraryPath(b.path("zig-out/llama/ggml/src"));
-        embed.addLibraryPath(b.path("zig-out/llama/ggml/src/ggml-blas"));
-        embed.addLibraryPath(b.path("zig-out/llama/ggml/src/ggml-metal"));
+        // The blas/metal archives only exist on macOS (the pinned cmake
+        // defaults build them only on Apple). Entries for missing
+        // directories make the linker warn on every artifact that imports
+        // this module, so mirror the library set above.
+        if (target.result.os.tag == .macos) {
+            embed.addLibraryPath(b.path("zig-out/llama/ggml/src/ggml-blas"));
+            embed.addLibraryPath(b.path("zig-out/llama/ggml/src/ggml-metal"));
+        }
         for (llama_libs) |name| {
             embed.linkSystemLibrary(name, .{ .use_pkg_config = .no, .preferred_link_mode = .static });
         }
@@ -222,15 +228,24 @@ pub fn build(b: *std.Build) void {
     // measurement. Kept out of `test` because the whole-file rewrite per
     // append makes the run take minutes.
     // Phase 4: LLM export gate (private exclusion, refusal, tokens).
+    // The verbose-report flag reads the process environment via a C
+    // `environ` extern, so the module declares its libc dependency
+    // (mandatory for Linux targets in 0.17; a no-op on macOS).
     const phase4_module = b.createModule(.{
         .root_source_file = b.path("test/phase4.zig"),
         .target = target,
+        .link_libc = true,
         .imports = &.{
             .{ .name = "zephyr_core", .module = core },
         },
     });
     const phase4_tests = b.addTest(.{ .root_module = phase4_module });
     const run_phase4_tests = b.addRunArtifact(phase4_tests);
+    // Always re-run rather than trust the run cache: the suite is
+    // in-memory and costs seconds, and a fresh run on every invocation
+    // keeps the gate measurement honest (0.17 caches run steps whose
+    // manifest is unchanged).
+    run_phase4_tests.has_side_effects = true;
 
     // Phase 5: anchor vectors — RFC 8032 known answers plus the pinned 190-byte
     // artifacts, re-derived from their inputs with std.crypto Ed25519.
